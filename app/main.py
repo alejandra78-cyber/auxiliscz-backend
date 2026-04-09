@@ -5,6 +5,9 @@ from .api.routes import (
     ia, pagos, notificaciones, dashboard, calificaciones
 )
 from .api.routes import websocket
+from .packages.asignacion_servicio.router import router as asignacion_router
+from .packages.emergencias.router import router as emergencias_router
+from .packages.ia_incidente.router import router as ia_incidente_router
 from .core.database import engine, Base
 
 Base.metadata.create_all(bind=engine)
@@ -33,6 +36,9 @@ app.include_router(pagos.router,          prefix="/api/pagos",          tags=["P
 app.include_router(notificaciones.router, prefix="/api/notificaciones", tags=["Notificaciones"])
 app.include_router(calificaciones.router, prefix="/api/calificaciones", tags=["Calificaciones"])
 app.include_router(dashboard.router,      prefix="/api/dashboard",      tags=["Dashboard Admin"])
+app.include_router(emergencias_router,    prefix="/api/emergencias",    tags=["Paquete 3 - Emergencias"])
+app.include_router(ia_incidente_router,   prefix="/api/ia-incidente",   tags=["Paquete 5 - IA Incidente"])
+app.include_router(asignacion_router,     prefix="/api/asignacion",     tags=["Paquete 6 - Asignación"])
 
 # WebSockets
 app.include_router(websocket.router,      prefix="/api/ws",             tags=["WebSocket"])

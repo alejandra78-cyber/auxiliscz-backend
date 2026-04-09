@@ -7,8 +7,10 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import create_access_token, get_password_hash, verify_password
 from app.models.models import Usuario
+from app.packages.auth.router import router as cambiar_password_router
 
 router = APIRouter()
+router.include_router(cambiar_password_router)
 
 
 class RegisterIn(BaseModel):
