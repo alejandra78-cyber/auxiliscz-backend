@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -21,7 +22,7 @@ class TokenOut(BaseModel):
 
 
 class UsuarioOut(BaseModel):
-    id: str
+    id: UUID
     nombre: str
     email: EmailStr
     telefono: str | None = None
