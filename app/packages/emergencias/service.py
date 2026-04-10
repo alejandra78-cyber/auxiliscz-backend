@@ -15,6 +15,7 @@ from app.services.notificaciones import enviar_push
 
 from .repository import (
     agregar_evidencia,
+    actualizar_ubicacion_incidente,
     crear_incidente,
     obtener_incidente_por_id,
     registrar_historial,
@@ -173,3 +174,44 @@ def consultar_estado_solicitud(db: Session, *, incidente_id: str, current_user: 
 
     return incidente
 
+
+def enviar_ubicacion_gps(
+    db: Session,
+    *,
+    incidente_id: str,
+    lat: float,
+    lng: float,
+    current_user: Usuario,
+):
+    incidente = obtener_incidente_por_id(db, incidente_id)
+    if not incidente:
+        raise HTTPException(status_code=404, detail="Incidente no encontrado")
+    if str(incidente.usuario_id) != str(current_user.id) and current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="No autorizado para actualizar ubicación")
+    return actualizar_ubicacion_incidente(db, incidente=incidente, lat=lat, lng=lng)
+
+
+async def cargar_imagen_incidente(
+    db: Session,
+    *,
+    incidente_id: str,
+    imagen: UploadFile,
+    current_user: Usuario,
+):
+    incidente = obtener_incidente_por_id(db, incidente_id)
+    if not incidente:
+        raise HTTPException(status_code=404, detail="Incidente no encontrado")
+    if str(incidente.usuario_id) != str(current_user.id) and current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="No autorizado para adjuntar imagen")
+
+    contenido = await imagen.read()
+    analisis = await clasificar_incidente_por_imagenes(contenido)
+    evidencia = agregar_evidencia(
+        db,
+        incidente_id=incidente.id,
+        tipo="imagen",
+        transcripcion=json.dumps(analisis, ensure_ascii=False),
+    )
+    db.commit()
+    db.refresh(evidencia)
+    return evidencia

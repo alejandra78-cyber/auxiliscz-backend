@@ -63,3 +63,11 @@ def registrar_historial(
 def obtener_incidente_por_id(db: Session, incidente_id: str) -> Incidente | None:
     return db.query(Incidente).filter(Incidente.id == incidente_id).first()
 
+
+def actualizar_ubicacion_incidente(db: Session, *, incidente: Incidente, lat: float, lng: float) -> Incidente:
+    incidente.lat_incidente = lat
+    incidente.lng_incidente = lng
+    db.add(incidente)
+    db.commit()
+    db.refresh(incidente)
+    return incidente

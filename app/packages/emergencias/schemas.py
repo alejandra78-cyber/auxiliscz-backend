@@ -14,3 +14,20 @@ class EstadoSolicitudOut(BaseModel):
     tipo: str | None = None
     taller_id: str | None = None
 
+
+class UbicacionGpsIn(BaseModel):
+    lat: float
+    lng: float
+
+
+class UbicacionGpsOut(BaseModel):
+    incidente_id: str
+    lat: float
+    lng: float
+    mensaje: str = "Ubicación actualizada correctamente"
+
+
+class ImagenIncidenteOut(BaseModel):
+    incidente_id: str
+    evidencia_id: str
+    mensaje: str = "Imagen registrada correctamente"

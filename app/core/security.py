@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import Depends, Header, HTTPException
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from passlib.exc import UnknownHashError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -22,11 +23,18 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Prefer PBKDF2 to avoid runtime issues with bcrypt backends in some local environments.
+# Keep bcrypt in supported schemes for backward compatibility with existing hashes.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except (UnknownHashError, ValueError):
+        return False
+    except Exception:
+        return False
 
 
 def get_password_hash(password: str) -> str:
