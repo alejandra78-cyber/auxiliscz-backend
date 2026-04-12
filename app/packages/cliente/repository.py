@@ -3,7 +3,16 @@ from sqlalchemy.orm import Session
 from app.models.models import Usuario, Vehiculo
 
 
-def crear_vehiculo(db: Session, *, usuario: Usuario, placa: str, marca: str | None, modelo: str | None, anio: int | None, color: str | None) -> Vehiculo:
+def crear_vehiculo(
+    db: Session,
+    *,
+    usuario: Usuario,
+    placa: str,
+    marca: str | None,
+    modelo: str | None,
+    anio: int | None,
+    color: str | None,
+) -> Vehiculo:
     vehiculo = Vehiculo(
         usuario_id=usuario.id,
         placa=placa.upper().strip(),

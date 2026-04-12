@@ -11,7 +11,7 @@ from .schemas import (
     UbicacionGpsIn,
     UbicacionGpsOut,
 )
-from .service import (
+from .services import (
     cargar_imagen_incidente,
     consultar_estado_solicitud,
     enviar_ubicacion_gps,
@@ -106,3 +106,6 @@ async def cargar_imagen_incidente_endpoint(
         current_user=current_user,
     )
     return ImagenIncidenteOut(incidente_id=incidente_id, evidencia_id=str(evidencia.id))
+
+
+__all__ = ["router"]

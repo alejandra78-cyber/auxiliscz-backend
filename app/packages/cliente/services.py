@@ -17,10 +17,10 @@ def registrar_vehiculo(
     color: str | None,
 ):
     if current_user.rol not in {"conductor", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo cliente/admin puede registrar vehículos")
+        raise HTTPException(status_code=403, detail="Solo cliente/admin puede registrar vehiculos")
 
     if get_vehiculo_by_placa(db, placa):
-        raise HTTPException(status_code=400, detail="La placa ya está registrada")
+        raise HTTPException(status_code=400, detail="La placa ya esta registrada")
 
     return crear_vehiculo(
         db,

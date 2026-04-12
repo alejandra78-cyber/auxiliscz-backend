@@ -1,7 +1,9 @@
 import json
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -22,7 +24,7 @@ class TallerCreate(BaseModel):
 
 
 class TallerOut(BaseModel):
-    id: str
+    id: UUID
     nombre: str
     direccion: str | None = None
     latitud: float | None = None
@@ -41,7 +43,7 @@ class TecnicoCreate(BaseModel):
 
 
 class TecnicoOut(BaseModel):
-    id: str
+    id: UUID
     nombre: str
     disponible: bool
 
@@ -91,6 +93,16 @@ def crear_taller(
     if current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="Solo admin puede crear talleres")
 
+    usuario_taller = db.query(Usuario).filter(Usuario.id == datos.usuario_id).first()
+    if not usuario_taller:
+        raise HTTPException(status_code=404, detail="El usuario indicado no existe")
+    if usuario_taller.rol != "taller":
+        raise HTTPException(status_code=400, detail="El usuario indicado debe tener rol 'taller'")
+
+    taller_existente = db.query(Taller).filter(Taller.usuario_id == datos.usuario_id).first()
+    if taller_existente:
+        raise HTTPException(status_code=400, detail="El usuario ya tiene un taller registrado")
+
     taller = Taller(
         usuario_id=datos.usuario_id,
         nombre=datos.nombre,
@@ -100,9 +112,13 @@ def crear_taller(
         servicios=json.dumps(datos.servicios),
         disponible=datos.disponible,
     )
-    db.add(taller)
-    db.commit()
-    db.refresh(taller)
+    try:
+        db.add(taller)
+        db.commit()
+        db.refresh(taller)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="No se pudo registrar el taller por datos inválidos")
     return _parsear_servicios(taller)
 
 

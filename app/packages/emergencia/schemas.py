@@ -24,7 +24,7 @@ class UbicacionGpsOut(BaseModel):
     incidente_id: str
     lat: float
     lng: float
-    mensaje: str = "Ubicación actualizada correctamente"
+    mensaje: str = "Ubicacion actualizada correctamente"
 
 
 class ImagenIncidenteOut(BaseModel):

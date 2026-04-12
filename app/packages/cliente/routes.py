@@ -30,3 +30,6 @@ def registrar_vehiculo_endpoint(
 @router.get("/vehiculos", response_model=list[VehiculoOut])
 def mis_vehiculos_endpoint(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return mis_vehiculos(db, current_user=current_user)
+
+
+__all__ = ["router"]

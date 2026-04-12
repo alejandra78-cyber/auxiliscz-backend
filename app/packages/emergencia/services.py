@@ -3,14 +3,11 @@ import json
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.ai_modules.audio import transcribir_audio
+from app.ai_modules.resumen import generar_resumen
+from app.ai_modules.vision import analizar_imagen
 from app.models.models import AnalisisIA, Usuario
-from app.packages.asignacion_servicio.service import asignar_taller_automaticamente
-from app.packages.ia_incidente.service import (
-    asignar_nivel_prioridad,
-    clasificar_incidente_por_imagenes,
-    generar_ficha_resumen_incidente,
-    transcribir_audio_a_texto,
-)
+from app.packages.asignacion.services import asignar_taller_automaticamente
 from app.services.notificaciones import enviar_push
 
 from .repository import (
@@ -20,6 +17,32 @@ from .repository import (
     obtener_incidente_por_id,
     registrar_historial,
 )
+
+PRIORIDAD_POR_TIPO = {
+    "choque": 1,
+    "motor": 1,
+    "bateria": 2,
+    "llanta": 2,
+    "llave": 2,
+    "otro": 3,
+    "incierto": 2,
+}
+
+
+async def transcribir_audio_a_texto(audio_bytes: bytes, idioma: str = "es") -> str:
+    return await transcribir_audio(audio_bytes, idioma)
+
+
+async def clasificar_incidente_por_imagenes(imagen_bytes: bytes) -> dict:
+    return await analizar_imagen(imagen_bytes)
+
+
+def asignar_nivel_prioridad(tipo_incidente: str) -> int:
+    return PRIORIDAD_POR_TIPO.get(tipo_incidente, 2)
+
+
+async def generar_ficha_resumen_incidente(clasificacion: dict, evidencias: list[dict]) -> str:
+    return await generar_resumen(clasificacion, evidencias)
 
 
 async def reportar_emergencia(
@@ -156,7 +179,7 @@ async def _procesar_asignacion_automatica(
                 usuario_id,
                 {
                     "titulo": "Taller asignado",
-                    "cuerpo": f"{taller.nombre} está en camino",
+                    "cuerpo": f"{taller.nombre} esta en camino",
                     "tipo": "asignacion",
                 },
             )
@@ -187,7 +210,7 @@ def enviar_ubicacion_gps(
     if not incidente:
         raise HTTPException(status_code=404, detail="Incidente no encontrado")
     if str(incidente.usuario_id) != str(current_user.id) and current_user.rol != "admin":
-        raise HTTPException(status_code=403, detail="No autorizado para actualizar ubicación")
+        raise HTTPException(status_code=403, detail="No autorizado para actualizar ubicacion")
     return actualizar_ubicacion_incidente(db, incidente=incidente, lat=lat, lng=lng)
 
 
