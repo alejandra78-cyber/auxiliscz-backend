@@ -72,3 +72,13 @@ class CambiarPasswordIn(BaseModel):
 class CambiarPasswordOut(BaseModel):
     ok: bool = True
     mensaje: str = "Contraseña actualizada correctamente"
+
+
+class DeviceTokenIn(BaseModel):
+    token: str = Field(..., min_length=20, max_length=512)
+    plataforma: str | None = Field(default="unknown", max_length=30)
+
+
+class DeviceTokenOut(BaseModel):
+    ok: bool = True
+    mensaje: str = "Token de dispositivo actualizado"

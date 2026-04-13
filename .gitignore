@@ -1,6 +1,8 @@
 # Entorno virtual
 venv/
 .env/
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -23,3 +25,7 @@ Thumbs.db
 
 # Node (por error si aparece)
 node_modules/
+
+# Firebase (credenciales sensibles)
+firebase-credentials.json
+*firebase*credentials*.json

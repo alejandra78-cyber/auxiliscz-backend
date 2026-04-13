@@ -8,6 +8,8 @@ from .schemas import (
     CambiarPasswordIn,
     CambiarPasswordOut,
     CambiarRolIn,
+    DeviceTokenIn,
+    DeviceTokenOut,
     LoginIn,
     LogoutOut,
     RecuperarPasswordRequestIn,
@@ -18,6 +20,7 @@ from .schemas import (
     TokenOut,
     UsuarioOut,
 )
+from app.services.notificaciones import desactivar_token_dispositivo, registrar_token_dispositivo
 from .services import (
     cambiar_password,
     cambiar_rol_usuario,
@@ -89,3 +92,32 @@ def cambiar_password_endpoint(
 ):
     cambiar_password(db, current_user, payload)
     return CambiarPasswordOut()
+
+
+@router.post("/device-token", response_model=DeviceTokenOut)
+def registrar_device_token(
+    payload: DeviceTokenIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    registrar_token_dispositivo(
+        db,
+        usuario_id=str(current_user.id),
+        token=payload.token,
+        plataforma=payload.plataforma,
+    )
+    return DeviceTokenOut()
+
+
+@router.post("/device-token/remove", response_model=DeviceTokenOut)
+def remover_device_token(
+    payload: DeviceTokenIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    desactivar_token_dispositivo(
+        db,
+        usuario_id=str(current_user.id),
+        token=payload.token,
+    )
+    return DeviceTokenOut(mensaje="Token de dispositivo desactivado")

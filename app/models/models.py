@@ -22,6 +22,7 @@ class Usuario(Base):
     vehiculos = relationship("Vehiculo", back_populates="usuario")
     incidentes = relationship("Incidente", back_populates="usuario")
     taller = relationship("Taller", back_populates="usuario", uselist=False)
+    dispositivos_push = relationship("DispositivoPush", back_populates="usuario")
 
 
 class Vehiculo(Base):
@@ -161,3 +162,16 @@ class HistorialEstado(Base):
     cambiado_en = Column(DateTime, default=datetime.utcnow)
 
     incidente = relationship("Incidente", back_populates="historial")
+
+
+class DispositivoPush(Base):
+    __tablename__ = "dispositivos_push"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False, index=True)
+    token = Column(String(512), unique=True, nullable=False, index=True)
+    plataforma = Column(String(30), default="unknown")
+    activo = Column(Boolean, default=True)
+    actualizado_en = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    usuario = relationship("Usuario", back_populates="dispositivos_push")
