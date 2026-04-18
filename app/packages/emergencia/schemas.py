@@ -31,3 +31,20 @@ class ImagenIncidenteOut(BaseModel):
     incidente_id: str
     evidencia_id: str
     mensaje: str = "Imagen registrada correctamente"
+
+
+class CancelarSolicitudOut(BaseModel):
+    incidente_id: str
+    estado: str
+    mensaje: str = "Solicitud cancelada correctamente"
+
+
+class MensajeIn(BaseModel):
+    texto: str
+
+
+class MensajeOut(BaseModel):
+    evidencia_id: str
+    autor_rol: str
+    texto: str
+    creado_en: str | None = None
