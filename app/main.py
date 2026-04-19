@@ -19,13 +19,16 @@ from .core.database import engine, Base
 
 def init_firebase():
     firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
-    if not firebase_json:
-        raise ValueError("No existe FIREBASE_CREDENTIALS_JSON")
 
-    cred_dict = json.loads(firebase_json)
+    if firebase_json:
+        # 🔵 Railway (usa variable)
+        cred_dict = json.loads(firebase_json)
+        cred = credentials.Certificate(cred_dict)
+    else:
+        # 🟢 Local (usa archivo)
+        cred = credentials.Certificate("firebase-credentials.json")
 
     if not firebase_admin._apps:
-        cred = credentials.Certificate(cred_dict)
         initialize_app(cred)
 
 
