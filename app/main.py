@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import (
     auth, usuarios, incidentes, talleres,
-    ia, pagos, notificaciones, dashboard, calificaciones
+    ia, pagos, notificaciones, dashboard, calificaciones, solicitudes
+
 )
 from .api.routes import websocket
 from .core.database import engine, Base
@@ -33,6 +34,7 @@ app.include_router(pagos.router,          prefix="/api/pagos",          tags=["P
 app.include_router(notificaciones.router, prefix="/api/notificaciones", tags=["Notificaciones"])
 app.include_router(calificaciones.router, prefix="/api/calificaciones", tags=["Calificaciones"])
 app.include_router(dashboard.router,      prefix="/api/dashboard",      tags=["Dashboard Admin"])
+app.include_router(solicitudes.router,    prefix="/api/solicitudes",   tags=["Solicitudes"])
 
 # WebSockets
 app.include_router(websocket.router,      prefix="/api/ws",             tags=["WebSocket"])
