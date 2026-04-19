@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from .api.routes import (
     auth, usuarios, incidentes, talleres,
     ia, pagos, notificaciones, dashboard, calificaciones
