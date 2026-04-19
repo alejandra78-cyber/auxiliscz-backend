@@ -4,10 +4,10 @@ from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.ai_modules.audio import transcribir_audio
+from app.ai_modules.clasificador import clasificar_incidente
 from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
 from app.models.models import Solicitud, Usuario
-from app.packages.asignacion.services import asignar_taller_automaticamente
 from app.services.notificaciones import enviar_push
 
 from .repository import (
@@ -16,6 +16,7 @@ from .repository import (
     crear_mensaje,
     crear_notificacion,
     crear_solicitud_emergencia,
+    listar_notificaciones_usuario,
     listar_mensajes_solicitud as repo_listar_mensajes_solicitud,
     obtener_solicitud_por_id_o_incidente,
     registrar_cambio_estado,
@@ -30,6 +31,7 @@ PRIORIDAD_POR_TIPO = {
     "otro": 3,
     "incierto": 2,
 }
+TIPOS_INCIDENTE_VALIDOS = set(PRIORIDAD_POR_TIPO.keys())
 
 
 async def transcribir_audio_a_texto(audio_bytes: bytes, idioma: str = "es") -> str:
@@ -65,16 +67,22 @@ async def reportar_emergencia(
     background_tasks: BackgroundTasks,
     current_user: Usuario,
     vehiculo_id: str,
+    tipo: str | None,
     lat: float,
     lng: float,
     descripcion: str | None,
     foto: UploadFile | None,
     audio: UploadFile | None,
 ) -> str:
+    tipo_normalizado = (tipo or "otro").strip().lower()
+    if tipo_normalizado not in TIPOS_INCIDENTE_VALIDOS:
+        tipo_normalizado = "otro"
+
     solicitud = crear_solicitud_emergencia(
         db,
         usuario_id=current_user.id,
         vehiculo_id=vehiculo_id,
+        tipo=tipo_normalizado,
         lat=lat,
         lng=lng,
         descripcion=descripcion,
@@ -120,6 +128,16 @@ async def reportar_emergencia(
         )
         evidencias_datos.append({"tipo": "texto", "texto": descripcion})
 
+    # Notificación de creación al cliente
+    crear_notificacion(
+        db,
+        usuario_id=current_user.id,
+        solicitud_id=solicitud.id,
+        titulo="Emergencia reportada",
+        mensaje=f"Tu solicitud fue registrada y está en estado {solicitud.estado}",
+        tipo="emergencia",
+    )
+
     db.commit()
 
     background_tasks.add_task(
@@ -142,7 +160,6 @@ async def _procesar_asignacion_automatica(
     usuario_id: str,
 ) -> None:
     from app.core.database import SessionLocal
-    from app.models.models import Asignacion
 
     db = SessionLocal()
     try:
@@ -151,66 +168,59 @@ async def _procesar_asignacion_automatica(
             return
         tipo = "otro"
         confianza = 0.7
+        if solicitud.emergencia and solicitud.emergencia.tipo:
+            tipo = str(solicitud.emergencia.tipo)
         if evidencias:
-            clasificacion = evidencias[0] if evidencias[0].get("tipo") == "imagen" else {}
-            tipo = clasificacion.get("datos", {}).get("categoria_probable", "otro")
-            confianza = float(clasificacion.get("datos", {}).get("confianza", 0.7))
+            clasificacion = next((ev for ev in evidencias if ev.get("tipo") == "imagen"), {})
+            if clasificacion:
+                tipo = clasificacion.get("datos", {}).get("categoria_probable", tipo)
+                confianza = float(clasificacion.get("datos", {}).get("confianza", 0.7))
+
+        # Clasificación multimodal (texto + audio + imagen)
+        try:
+            clasificacion_mm = await clasificar_incidente(evidencias)
+            if clasificacion_mm:
+                tipo = str(clasificacion_mm.get("tipo", tipo))
+                confianza = float(clasificacion_mm.get("confianza", confianza))
+        except Exception:
+            clasificacion_mm = None
 
         prioridad = asignar_nivel_prioridad(tipo)
         if solicitud.emergencia:
             solicitud.emergencia.tipo = tipo
             solicitud.emergencia.prioridad = prioridad
-            solicitud.emergencia.estado = "en_evaluacion"
         solicitud.prioridad = prioridad
-        solicitud.estado = "en_evaluacion"
-        registrar_cambio_estado(
+        agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
-            estado_anterior="pendiente",
-            estado_nuevo="en_evaluacion",
-            comentario="Clasificación automática inicial",
+            tipo="clasificacion_ia",
+            transcripcion=json.dumps(
+                {
+                    "tipo": tipo,
+                    "prioridad": prioridad,
+                    "confianza": confianza,
+                    "multimodal": clasificacion_mm or {},
+                },
+                ensure_ascii=False,
+            ),
         )
 
         try:
-            await generar_ficha_resumen_incidente(
+            resumen = await generar_ficha_resumen_incidente(
                 {"tipo": tipo, "prioridad": prioridad, "confianza": confianza},
                 evidencias,
+            )
+            agregar_evidencia_solicitud(
+                db,
+                solicitud=solicitud,
+                tipo="resumen_ia",
+                transcripcion=resumen,
             )
         except Exception:
             pass
 
-        taller = await asignar_taller_automaticamente(
-            db,
-            solicitud_id=solicitud_id,
-            lat=lat,
-            lng=lng,
-            tipo=tipo,
-            prioridad=prioridad,
-        )
-        if taller:
-            db.add(
-                Asignacion(
-                    solicitud_id=solicitud.id,
-                    taller_id=taller.id,
-                    tecnico_id=None,
-                    estado="asignada",
-                )
-            )
-            registrar_cambio_estado(
-                db,
-                solicitud=solicitud,
-                estado_anterior="en_evaluacion",
-                estado_nuevo="asignada",
-                comentario="Taller asignado automáticamente",
-            )
-            await enviar_push(
-                usuario_id,
-                {
-                    "titulo": "Taller asignado",
-                    "cuerpo": f"{taller.nombre} fue asignado a tu solicitud",
-                    "tipo": "asignacion",
-                },
-            )
+        # Mantener estado pendiente para respetar el flujo:
+        # pendiente -> evaluación (aprobada/rechazada) -> asignación -> ejecución.
         db.commit()
     finally:
         db.close()
@@ -369,3 +379,32 @@ async def enviar_mensaje_solicitud(
         "texto": msg.contenido,
         "creado_en": msg.creado_en.isoformat() if msg.creado_en else None,
     }
+
+
+def listar_notificaciones_solicitud(
+    db: Session,
+    *,
+    current_user: Usuario,
+    incidente_id: str | None = None,
+):
+    solicitud_id = None
+    if incidente_id:
+        solicitud = obtener_solicitud_por_id_o_incidente(db, incidente_id)
+        if not solicitud:
+            raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+        if not _puede_ver_solicitud(solicitud, current_user):
+            raise HTTPException(status_code=403, detail="No autorizado para ver notificaciones")
+        solicitud_id = solicitud.id
+
+    rows = listar_notificaciones_usuario(db, usuario_id=current_user.id, solicitud_id=solicitud_id)
+    return [
+        {
+            "id": str(n.id),
+            "titulo": n.titulo,
+            "mensaje": n.mensaje,
+            "tipo": n.tipo,
+            "estado": n.estado,
+            "creada_en": n.creada_en.isoformat() if n.creada_en else None,
+        }
+        for n in rows
+    ]

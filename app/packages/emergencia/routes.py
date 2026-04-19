@@ -10,6 +10,7 @@ from .schemas import (
     ImagenIncidenteOut,
     MensajeIn,
     MensajeOut,
+    NotificacionOut,
     ReportarEmergenciaOut,
     UbicacionGpsIn,
     UbicacionGpsOut,
@@ -21,6 +22,7 @@ from .services import (
     enviar_mensaje_solicitud,
     enviar_ubicacion_gps,
     listar_mensajes_solicitud,
+    listar_notificaciones_solicitud,
     reportar_emergencia,
 )
 
@@ -31,6 +33,7 @@ router = APIRouter()
 async def reportar_emergencia_endpoint(
     background_tasks: BackgroundTasks,
     vehiculo_id: str = Form(...),
+    tipo: str | None = Form(None),
     lat: float = Form(...),
     lng: float = Form(...),
     descripcion: str | None = Form(None),
@@ -44,6 +47,7 @@ async def reportar_emergencia_endpoint(
         background_tasks=background_tasks,
         current_user=current_user,
         vehiculo_id=vehiculo_id,
+        tipo=tipo,
         lat=lat,
         lng=lng,
         descripcion=descripcion,
@@ -68,11 +72,19 @@ def consultar_estado_solicitud_endpoint(
         incidente_id=incidente_id,
         current_user=current_user,
     )
+    resumen_ia = None
+    if getattr(solicitud, "evidencias", None):
+        for link in reversed(solicitud.evidencias):
+            ev = getattr(link, "evidencia", None)
+            if ev and ev.tipo == "resumen_ia" and ev.transcripcion:
+                resumen_ia = ev.transcripcion
+                break
     return EstadoSolicitudOut(
         incidente_id=str(solicitud.id),
         estado=str(solicitud.estado),
         prioridad=solicitud.prioridad,
         tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia and solicitud.emergencia.tipo else None,
+        resumen_ia=resumen_ia,
         taller_id=str(solicitud.asignaciones[-1].taller_id) if solicitud.asignaciones else None,
     )
 
@@ -151,6 +163,19 @@ async def enviar_mensaje_endpoint(
         incidente_id=incidente_id,
         current_user=current_user,
         texto=payload.texto,
+    )
+
+
+@router.get("/notificaciones", response_model=list[NotificacionOut])
+def listar_notificaciones_endpoint(
+    incidente_id: str | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return listar_notificaciones_solicitud(
+        db,
+        current_user=current_user,
+        incidente_id=incidente_id,
     )
 
 

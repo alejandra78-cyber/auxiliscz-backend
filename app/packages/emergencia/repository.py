@@ -26,6 +26,7 @@ def obtener_solicitud_por_id_o_incidente(db: Session, solicitud_id_o_incidente: 
             joinedload(Solicitud.emergencia),
             joinedload(Solicitud.cliente).joinedload(Cliente.usuario),
             joinedload(Solicitud.asignaciones),
+            joinedload(Solicitud.evidencias).joinedload(SolicitudEvidencia.evidencia),
         )
         .filter(Solicitud.id == raw_id)
         .first()
@@ -38,6 +39,7 @@ def obtener_solicitud_por_id_o_incidente(db: Session, solicitud_id_o_incidente: 
             joinedload(Solicitud.emergencia),
             joinedload(Solicitud.cliente).joinedload(Cliente.usuario),
             joinedload(Solicitud.asignaciones),
+            joinedload(Solicitud.evidencias).joinedload(SolicitudEvidencia.evidencia),
         )
         .filter(Solicitud.incidente_id == raw_id)
         .first()
@@ -59,6 +61,7 @@ def crear_solicitud_emergencia(
     *,
     usuario_id,
     vehiculo_id,
+    tipo: str,
     lat: float,
     lng: float,
     descripcion: str | None,
@@ -77,7 +80,7 @@ def crear_solicitud_emergencia(
     emergencia = Emergencia(
         id=uuid.uuid4(),
         solicitud_id=solicitud.id,
-        tipo="otro",
+        tipo=tipo,
         descripcion=descripcion,
         estado="pendiente",
         prioridad=2,
@@ -219,3 +222,10 @@ def crear_notificacion(
             estado="no_leida",
         )
     )
+
+
+def listar_notificaciones_usuario(db: Session, *, usuario_id, solicitud_id=None) -> list[Notificacion]:
+    q = db.query(Notificacion).filter(Notificacion.usuario_id == usuario_id)
+    if solicitud_id is not None:
+        q = q.filter(Notificacion.solicitud_id == solicitud_id)
+    return q.order_by(Notificacion.creada_en.desc()).all()

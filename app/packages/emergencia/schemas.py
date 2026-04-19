@@ -12,6 +12,7 @@ class EstadoSolicitudOut(BaseModel):
     estado: str
     prioridad: int | None = None
     tipo: str | None = None
+    resumen_ia: str | None = None
     taller_id: str | None = None
 
 
@@ -48,3 +49,12 @@ class MensajeOut(BaseModel):
     autor_rol: str
     texto: str
     creado_en: str | None = None
+
+
+class NotificacionOut(BaseModel):
+    id: str
+    titulo: str
+    mensaje: str
+    tipo: str
+    estado: str
+    creada_en: str | None = None
