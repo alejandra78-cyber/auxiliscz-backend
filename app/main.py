@@ -1,6 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import inspect, text
+from firebase_admin import credentials, initialize_app
+import firebase_admin
+import os
+import json
+
 from .api.routes import websocket
 from .packages.admin.routes import router as admin_router
 from .packages.asignacion.routes import router as asignacion_router
@@ -11,11 +16,25 @@ from .packages.pagos.routes import router as pagos_router
 from .packages.taller.routes import router as taller_router
 from .core.database import engine, Base
 
+
+def init_firebase():
+    firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+    if not firebase_json:
+        raise ValueError("No existe FIREBASE_CREDENTIALS_JSON")
+
+    cred_dict = json.loads(firebase_json)
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(cred_dict)
+        initialize_app(cred)
+
+
+init_firebase()
+
 Base.metadata.create_all(bind=engine)
 
 
 def _ensure_incremental_schema() -> None:
-    # Cambios incrementales sin migración destructiva.
     with engine.begin() as conn:
         inspector = inspect(conn)
         tables = set(inspector.get_table_names())
@@ -30,7 +49,6 @@ def _ensure_incremental_schema() -> None:
             if "usuario_id" not in cols_tec:
                 conn.execute(text("ALTER TABLE tecnicos ADD COLUMN usuario_id UUID"))
 
-        # Constraints/índices avanzados solo para PostgreSQL.
         if conn.dialect.name == "postgresql":
             conn.execute(
                 text(
@@ -82,20 +100,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# REST
-app.include_router(auth_router,           prefix="/api/auth",           tags=["Autenticación"])
-app.include_router(cliente_router,        prefix="/api/cliente",        tags=["Cliente"])
-app.include_router(cliente_router,        prefix="/api/clientes",       tags=["Cliente (Compat)"])
-app.include_router(taller_router,         prefix="/api/taller",         tags=["Taller"])
-app.include_router(taller_router,         prefix="/api/talleres",       tags=["Taller (Compat)"])
-app.include_router(emergencia_router,     prefix="/api/emergencia",     tags=["Emergencia"])
-app.include_router(emergencia_router,     prefix="/api/emergencias",    tags=["Emergencia (Compat)"])
-app.include_router(asignacion_router,     prefix="/api/asignacion",     tags=["Asignación"])
-app.include_router(pagos_router,          prefix="/api/pagos",          tags=["Pagos"])
-app.include_router(admin_router,          prefix="/api/admin",          tags=["Admin"])
+app.include_router(auth_router,        prefix="/api/auth",        tags=["Autenticación"])
+app.include_router(cliente_router,     prefix="/api/cliente",     tags=["Cliente"])
+app.include_router(cliente_router,     prefix="/api/clientes",    tags=["Cliente (Compat)"])
+app.include_router(taller_router,      prefix="/api/taller",      tags=["Taller"])
+app.include_router(taller_router,      prefix="/api/talleres",    tags=["Taller (Compat)"])
+app.include_router(emergencia_router,  prefix="/api/emergencia",  tags=["Emergencia"])
+app.include_router(emergencia_router,  prefix="/api/emergencias", tags=["Emergencia (Compat)"])
+app.include_router(asignacion_router,  prefix="/api/asignacion",  tags=["Asignación"])
+app.include_router(pagos_router,       prefix="/api/pagos",       tags=["Pagos"])
+app.include_router(admin_router,       prefix="/api/admin",       tags=["Admin"])
 
-# WebSockets
-app.include_router(websocket.router,      prefix="/api/ws",             tags=["WebSocket"])
+app.include_router(websocket.router,   prefix="/api/ws",          tags=["WebSocket"])
 
 @app.get("/")
 def root():
