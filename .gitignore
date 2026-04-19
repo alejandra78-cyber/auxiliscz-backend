@@ -29,3 +29,5 @@ node_modules/
 # Firebase (credenciales sensibles)
 firebase-credentials.json
 *firebase*credentials*.json
+
+.env

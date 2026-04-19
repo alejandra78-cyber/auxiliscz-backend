@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from .api.routes import websocket
 from .packages.admin.routes import router as admin_router
 from .packages.asignacion.routes import router as asignacion_router
@@ -17,31 +17,44 @@ Base.metadata.create_all(bind=engine)
 def _ensure_incremental_schema() -> None:
     # Cambios incrementales sin migración destructiva.
     with engine.begin() as conn:
-        conn.execute(text("ALTER TABLE IF EXISTS asignaciones ADD COLUMN IF NOT EXISTS servicio VARCHAR(100)"))
-        conn.execute(text("ALTER TABLE IF EXISTS tecnicos ADD COLUMN IF NOT EXISTS usuario_id UUID"))
-        conn.execute(
-            text(
-                """
-                DO $$
-                BEGIN
-                  IF NOT EXISTS (
-                    SELECT 1
-                    FROM pg_constraint
-                    WHERE conname = 'fk_tecnicos_usuario_id'
-                  ) THEN
-                    ALTER TABLE tecnicos
-                    ADD CONSTRAINT fk_tecnicos_usuario_id
-                    FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
-                  END IF;
-                END$$;
-                """
+        inspector = inspect(conn)
+        tables = set(inspector.get_table_names())
+
+        if "asignaciones" in tables:
+            cols_asig = {c["name"] for c in inspector.get_columns("asignaciones")}
+            if "servicio" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN servicio VARCHAR(100)"))
+
+        if "tecnicos" in tables:
+            cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}
+            if "usuario_id" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN usuario_id UUID"))
+
+        # Constraints/índices avanzados solo para PostgreSQL.
+        if conn.dialect.name == "postgresql":
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_tecnicos_usuario_id'
+                      ) THEN
+                        ALTER TABLE tecnicos
+                        ADD CONSTRAINT fk_tecnicos_usuario_id
+                        FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+                      END IF;
+                    END$$;
+                    """
+                )
             )
-        )
-        conn.execute(
-            text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tecnicos_usuario_id ON tecnicos(usuario_id) WHERE usuario_id IS NOT NULL"
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_tecnicos_usuario_id ON tecnicos(usuario_id) WHERE usuario_id IS NOT NULL"
+                )
             )
-        )
 
 
 _ensure_incremental_schema()
