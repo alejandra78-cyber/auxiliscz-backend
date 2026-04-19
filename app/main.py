@@ -96,6 +96,7 @@ app.add_middleware(
         "http://localhost:8080",
         "http://127.0.0.1:8080",
         "https://auxiliscz-web-speu.onrender.com",
+        "https://auxiliscz-web.vercel.app",
     ],
     allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
