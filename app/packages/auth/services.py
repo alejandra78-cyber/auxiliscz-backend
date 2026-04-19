@@ -14,6 +14,7 @@ from .repository import (
     crear_usuario,
     get_usuario_by_email,
     get_usuario_by_id,
+    permisos_de_rol,
 )
 from .schemas import CambiarPasswordIn, RecuperarPasswordRequestOut
 
@@ -44,7 +45,15 @@ def cerrar_sesion() -> dict:
 
 
 def obtener_permisos_por_rol(rol: str) -> list[str]:
+    # fallback estático si catálogo aún no tiene permisos sembrados
     return PERMISOS_POR_ROL.get(rol, [])
+
+
+def obtener_permisos_por_rol_db(db: Session, rol: str) -> list[str]:
+    permisos = permisos_de_rol(db, rol)
+    if permisos:
+        return permisos
+    return obtener_permisos_por_rol(rol)
 
 
 def cambiar_rol_usuario(db: Session, *, usuario_id: str, nuevo_rol: str) -> Usuario:

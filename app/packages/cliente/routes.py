@@ -4,8 +4,15 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_user
 
-from .schemas import VehiculoCreateIn, VehiculoOut
-from .services import mis_vehiculos, registrar_vehiculo
+from .schemas import EstadoSolicitudClienteOut, SolicitudSeguimientoOut, UbicacionTecnicoOut, VehiculoCreateIn, VehiculoOut
+from .services import (
+    consultar_estado_solicitud_cliente,
+    consultar_estado_ultima_solicitud_cliente,
+    listar_solicitudes_para_seguimiento,
+    mis_vehiculos,
+    registrar_vehiculo,
+    ver_ubicacion_tecnico,
+)
 
 router = APIRouter()
 
@@ -30,6 +37,66 @@ def registrar_vehiculo_endpoint(
 @router.get("/vehiculos", response_model=list[VehiculoOut])
 def mis_vehiculos_endpoint(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return mis_vehiculos(db, current_user=current_user)
+
+
+@router.get("/solicitudes/ultima/estado", response_model=EstadoSolicitudClienteOut)
+def estado_ultima_solicitud_cliente_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    solicitud = consultar_estado_ultima_solicitud_cliente(db, current_user=current_user)
+    return EstadoSolicitudClienteOut(
+        incidente_id=str(solicitud.id),
+        codigo_solicitud=f"SOL-{str(solicitud.id).split('-')[0].upper()}",
+        estado=str(solicitud.estado),
+        prioridad=solicitud.prioridad,
+        tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
+        taller_id=str(solicitud.asignaciones[-1].taller_id) if solicitud.asignaciones else None,
+    )
+
+
+@router.get("/solicitudes/{incidente_id}/estado", response_model=EstadoSolicitudClienteOut)
+def estado_solicitud_cliente_endpoint(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
+    return EstadoSolicitudClienteOut(
+        incidente_id=str(solicitud.id),
+        codigo_solicitud=f"SOL-{str(solicitud.id).split('-')[0].upper()}",
+        estado=str(solicitud.estado),
+        prioridad=solicitud.prioridad,
+        tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
+        taller_id=str(solicitud.asignaciones[-1].taller_id) if solicitud.asignaciones else None,
+    )
+
+
+@router.get("/solicitudes/{incidente_id}/tecnico-ubicacion", response_model=UbicacionTecnicoOut)
+def ubicacion_tecnico_endpoint(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return ver_ubicacion_tecnico(db, incidente_id=incidente_id, current_user=current_user)
+
+
+@router.get("/solicitudes/seguimiento", response_model=list[SolicitudSeguimientoOut])
+def solicitudes_seguimiento_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    rows = listar_solicitudes_para_seguimiento(db, current_user=current_user)
+    return [
+        SolicitudSeguimientoOut(
+            incidente_id=str(s.id),
+            codigo_solicitud=f"SOL-{str(s.id).split('-')[0].upper()}",
+            estado=str(s.estado),
+            tipo=str(s.emergencia.tipo) if s.emergencia else None,
+            prioridad=s.prioridad,
+        )
+        for s in rows
+    ]
 
 
 __all__ = ["router"]
