@@ -3,11 +3,9 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 from uuid import UUID
 
-from app.api.routes.dashboard import router as dashboard_router
-from app.api.routes.usuarios import router as usuarios_router
 from app.core.database import get_db
 from app.core.security import get_current_user
-from app.models.models import Usuario
+from app.models.models import Rol, Usuario, UsuarioRol
 
 from .services import estado_paquete_admin
 
@@ -42,16 +40,15 @@ def listar_usuarios_admin(db: Session = Depends(get_db), current_user=Depends(ge
 def listar_candidatos_taller(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="Solo admin puede listar candidatos a taller")
+    rol_taller = db.query(Rol).filter(Rol.nombre == "taller").first()
+    if not rol_taller:
+        return []
     usuarios = (
         db.query(Usuario)
-        .filter(Usuario.rol == "taller")
+        .join(UsuarioRol, UsuarioRol.usuario_id == Usuario.id)
+        .filter(UsuarioRol.rol_id == rol_taller.id)
         .filter(Usuario.taller == None)  # noqa: E711
         .order_by(Usuario.creado_en.desc())
         .all()
     )
     return usuarios
-
-
-# Compatibilidad y reorganización: expone funcionalidades existentes bajo /api/admin/*
-router.include_router(usuarios_router, prefix="/usuarios")
-router.include_router(dashboard_router, prefix="/reportes")
