@@ -1,0 +1,34 @@
+{
+  "started_at": "2026-04-18T18:27:50.611205",
+  "migrated": {
+    "roles_seeded": 3,
+    "permisos_seeded": 9,
+    "usuarios_roles": 0,
+    "clientes_created": 15,
+    "solicitudes_created": 4,
+    "emergencias_created": 4,
+    "ubicaciones_created": 4,
+    "historial_created": 0,
+    "solicitudes_evidencias_created": 4,
+    "mensajes_created": 0,
+    "notificaciones_created": 0,
+    "asignaciones_created": 0,
+    "disponibilidades_created": 6,
+    "turnos_created": 1,
+    "cotizaciones_created": 0,
+    "comisiones_created": 0,
+    "metricas_created": 10
+  },
+  "conflicts": {
+    "invalid_roles": [],
+    "incidentes_sin_vehiculo": [],
+    "historial_sin_solicitud": [],
+    "pagos_sin_solicitud": []
+  },
+  "notes": [
+    "Migración progresiva: no elimina ni altera tablas antiguas.",
+    "La migración es idempotente: evita duplicados por checks previos."
+  ],
+  "status": "ok",
+  "finished_at": "2026-04-18T18:27:51.263823"
+}
