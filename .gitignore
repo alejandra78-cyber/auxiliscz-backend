@@ -1,0 +1,31 @@
+# Entorno virtual
+venv/
+.env/
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Base de datos (si usas SQLite)
+db.sqlite3
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Node (por error si aparece)
+node_modules/
+
+# Firebase (credenciales sensibles)
+firebase-credentials.json
+*firebase*credentials*.json
