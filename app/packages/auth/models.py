@@ -1,6 +1,6 @@
 from app.models.models import Usuario
 
-ROLES_VALIDOS = {"conductor", "taller", "admin"}
+ROLES_VALIDOS = {"conductor", "taller", "tecnico", "admin"}
 
 PERMISOS_POR_ROL = {
     "conductor": [
@@ -13,6 +13,12 @@ PERMISOS_POR_ROL = {
         "gestionar_disponibilidad",
         "actualizar_estado_servicio",
         "consultar_historial_atenciones",
+        "cambiar_password",
+    ],
+    "tecnico": [
+        "actualizar_mi_ubicacion",
+        "consultar_servicios_asignados",
+        "registrar_trabajo_completado",
         "cambiar_password",
     ],
     "admin": [

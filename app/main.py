@@ -18,6 +18,30 @@ def _ensure_incremental_schema() -> None:
     # Cambios incrementales sin migración destructiva.
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE IF EXISTS asignaciones ADD COLUMN IF NOT EXISTS servicio VARCHAR(100)"))
+        conn.execute(text("ALTER TABLE IF EXISTS tecnicos ADD COLUMN IF NOT EXISTS usuario_id UUID"))
+        conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'fk_tecnicos_usuario_id'
+                  ) THEN
+                    ALTER TABLE tecnicos
+                    ADD CONSTRAINT fk_tecnicos_usuario_id
+                    FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+                  END IF;
+                END$$;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tecnicos_usuario_id ON tecnicos(usuario_id) WHERE usuario_id IS NOT NULL"
+            )
+        )
 
 
 _ensure_incremental_schema()

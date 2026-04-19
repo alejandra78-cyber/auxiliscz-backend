@@ -45,13 +45,15 @@ def estado_ultima_solicitud_cliente_endpoint(
     current_user=Depends(get_current_user),
 ):
     solicitud = consultar_estado_ultima_solicitud_cliente(db, current_user=current_user)
+    ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
         codigo_solicitud=f"SOL-{str(solicitud.id).split('-')[0].upper()}",
         estado=str(solicitud.estado),
         prioridad=solicitud.prioridad,
         tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
-        taller_id=str(solicitud.asignaciones[-1].taller_id) if solicitud.asignaciones else None,
+        taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
+        taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
     )
 
 
@@ -62,13 +64,15 @@ def estado_solicitud_cliente_endpoint(
     current_user=Depends(get_current_user),
 ):
     solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
+    ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
         codigo_solicitud=f"SOL-{str(solicitud.id).split('-')[0].upper()}",
         estado=str(solicitud.estado),
         prioridad=solicitud.prioridad,
         tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
-        taller_id=str(solicitud.asignaciones[-1].taller_id) if solicitud.asignaciones else None,
+        taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
+        taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
     )
 
 

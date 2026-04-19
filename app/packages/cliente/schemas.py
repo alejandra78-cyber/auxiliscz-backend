@@ -29,6 +29,7 @@ class EstadoSolicitudClienteOut(BaseModel):
     prioridad: int | None = None
     tipo: str | None = None
     taller_id: str | None = None
+    taller_nombre: str | None = None
 
 
 class UbicacionTecnicoOut(BaseModel):

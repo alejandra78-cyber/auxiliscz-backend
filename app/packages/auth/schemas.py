@@ -8,7 +8,7 @@ class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
     telefono: str | None = None
-    rol: str = Field(default="conductor", pattern="^(conductor|taller|admin)$")
+    rol: str = Field(default="conductor", pattern="^(conductor|taller|tecnico|admin)$")
 
 
 class LoginIn(BaseModel):
@@ -45,7 +45,7 @@ class RolPermisoOut(BaseModel):
 
 class CambiarRolIn(BaseModel):
     usuario_id: str
-    nuevo_rol: str = Field(..., pattern="^(conductor|taller|admin)$")
+    nuevo_rol: str = Field(..., pattern="^(conductor|taller|tecnico|admin)$")
 
 
 class RecuperarPasswordRequestIn(BaseModel):

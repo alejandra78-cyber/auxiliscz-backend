@@ -21,6 +21,7 @@ class Usuario(Base):
     vehiculos = relationship("Vehiculo", back_populates="usuario")
     taller = relationship("Taller", back_populates="usuario", uselist=False)
     cliente = relationship("Cliente", back_populates="usuario", uselist=False)
+    tecnico = relationship("Tecnico", back_populates="usuario", uselist=False)
     usuario_roles = relationship("UsuarioRol", back_populates="usuario")
     notificaciones = relationship("Notificacion", back_populates="usuario")
     auditorias = relationship("Auditoria", back_populates="usuario")
@@ -115,12 +116,14 @@ class Tecnico(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=False)
+    usuario_id = Column(GUID(), ForeignKey("usuarios.id"), unique=True, nullable=True)
     nombre = Column(String(100), nullable=False)
     disponible = Column(Boolean, default=True)
     lat_actual = Column(Float)
     lng_actual = Column(Float)
 
     taller = relationship("Taller", back_populates="tecnicos")
+    usuario = relationship("Usuario", back_populates="tecnico")
     turnos = relationship("Turno", back_populates="tecnico")
     asignaciones = relationship("Asignacion", back_populates="tecnico")
     disponibilidades = relationship("Disponibilidad", back_populates="tecnico")

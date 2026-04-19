@@ -14,6 +14,7 @@ class EstadoSolicitudOut(BaseModel):
     tipo: str | None = None
     resumen_ia: str | None = None
     taller_id: str | None = None
+    taller_nombre: str | None = None
 
 
 class UbicacionGpsIn(BaseModel):

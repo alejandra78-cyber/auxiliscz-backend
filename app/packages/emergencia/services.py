@@ -58,6 +58,13 @@ def _puede_ver_solicitud(solicitud: Solicitud, current_user: Usuario) -> bool:
     for a in solicitud.asignaciones:
         if a.taller and str(a.taller.usuario_id) == str(current_user.id):
             return True
+        # Compatibilidad: si la asignación no tiene taller enlazado pero sí técnico,
+        # permitimos acceso al dueño del taller del técnico asignado.
+        if a.tecnico and a.tecnico.taller and str(a.tecnico.taller.usuario_id) == str(current_user.id):
+            return True
+        # Acceso para cuenta técnico vinculada.
+        if a.tecnico and a.tecnico.usuario_id and str(a.tecnico.usuario_id) == str(current_user.id):
+            return True
     return False
 
 

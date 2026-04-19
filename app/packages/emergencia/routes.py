@@ -72,6 +72,7 @@ def consultar_estado_solicitud_endpoint(
         incidente_id=incidente_id,
         current_user=current_user,
     )
+    ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
     resumen_ia = None
     if getattr(solicitud, "evidencias", None):
         for link in reversed(solicitud.evidencias):
@@ -85,7 +86,8 @@ def consultar_estado_solicitud_endpoint(
         prioridad=solicitud.prioridad,
         tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia and solicitud.emergencia.tipo else None,
         resumen_ia=resumen_ia,
-        taller_id=str(solicitud.asignaciones[-1].taller_id) if solicitud.asignaciones else None,
+        taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
+        taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
     )
 
 

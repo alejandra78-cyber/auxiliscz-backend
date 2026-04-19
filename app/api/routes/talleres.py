@@ -16,11 +16,13 @@ from app.models.models import (
     Emergencia,
     Historial,
     Notificacion,
+    Rol,
     Solicitud,
     Taller,
     Tecnico,
     Ubicacion,
     Usuario,
+    UsuarioRol,
 )
 
 router = APIRouter()
@@ -51,12 +53,14 @@ class TallerOut(BaseModel):
 
 
 class TecnicoCreate(BaseModel):
-    nombre: str = Field(..., min_length=3)
+    usuario_id: str
     disponible: bool = True
 
 
 class TecnicoOut(BaseModel):
     id: UUID
+    usuario_id: UUID | None = None
+    email: str | None = None
     nombre: str
     disponible: bool
 
@@ -64,8 +68,19 @@ class TecnicoOut(BaseModel):
         from_attributes = True
 
 
+class TecnicoCandidatoOut(BaseModel):
+    id: UUID
+    nombre: str
+    email: str
+
+
 class DisponibilidadIn(BaseModel):
     disponible: bool
+
+
+class UbicacionTecnicoIn(BaseModel):
+    lat: float
+    lng: float
 
 
 class HistorialAtencionOut(BaseModel):
@@ -125,7 +140,11 @@ def _resolver_solicitud(db: Session, solicitud_id_o_incidente: str) -> Solicitud
 
 
 def _obtener_tecnico_de_usuario(db: Session, current_user: Usuario) -> Tecnico | None:
-    # Mapeo por nombre para rol técnico cuando no existe FK usuario_id en Tecnico.
+    # Flujo actual: técnico vinculado por usuario_id.
+    tecnico = db.query(Tecnico).filter(Tecnico.usuario_id == current_user.id).first()
+    if tecnico:
+        return tecnico
+    # Compatibilidad temporal con datos antiguos (antes del vínculo por usuario_id).
     return db.query(Tecnico).filter(Tecnico.nombre == current_user.nombre).first()
 
 
@@ -207,15 +226,41 @@ def registrar_tecnico(
         raise HTTPException(status_code=403, detail="Solo un taller puede registrar técnicos")
 
     taller = _obtener_taller_de_usuario(db, current_user)
+    usuario_tecnico = db.query(Usuario).filter(Usuario.id == payload.usuario_id).first()
+    if not usuario_tecnico:
+        raise HTTPException(status_code=404, detail="El usuario técnico no existe")
+
+    rol_tecnico = db.query(Rol).filter(Rol.nombre == "tecnico").first()
+    if not rol_tecnico:
+        raise HTTPException(status_code=400, detail="No existe el rol 'tecnico' en el sistema")
+    has_tecnico_role = (
+        db.query(UsuarioRol)
+        .filter(UsuarioRol.usuario_id == usuario_tecnico.id, UsuarioRol.rol_id == rol_tecnico.id)
+        .first()
+    )
+    if not has_tecnico_role:
+        raise HTTPException(status_code=400, detail="El usuario seleccionado no tiene rol técnico")
+
+    existe_vinculo = db.query(Tecnico).filter(Tecnico.usuario_id == usuario_tecnico.id).first()
+    if existe_vinculo:
+        raise HTTPException(status_code=400, detail="Este usuario técnico ya está vinculado a un taller")
+
     tecnico = Tecnico(
         taller_id=taller.id,
-        nombre=payload.nombre,
+        usuario_id=usuario_tecnico.id,
+        nombre=usuario_tecnico.nombre,
         disponible=payload.disponible,
     )
     db.add(tecnico)
     db.commit()
     db.refresh(tecnico)
-    return tecnico
+    return TecnicoOut(
+        id=tecnico.id,
+        usuario_id=tecnico.usuario_id,
+        email=usuario_tecnico.email,
+        nombre=tecnico.nombre,
+        disponible=tecnico.disponible,
+    )
 
 
 @router.get("/mi-taller/tecnicos", response_model=list[TecnicoOut])
@@ -226,7 +271,43 @@ def listar_tecnicos_mi_taller(
     if current_user.rol != "taller":
         raise HTTPException(status_code=403, detail="Solo un taller puede listar técnicos")
     taller = _obtener_taller_de_usuario(db, current_user)
-    return db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
+    rows = db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
+    out: list[TecnicoOut] = []
+    for t in rows:
+        out.append(
+            TecnicoOut(
+                id=t.id,
+                usuario_id=t.usuario_id,
+                email=t.usuario.email if t.usuario else None,
+                nombre=t.nombre,
+                disponible=t.disponible,
+            )
+        )
+    return out
+
+
+@router.get("/mi-taller/tecnicos/candidatos", response_model=list[TecnicoCandidatoOut])
+def listar_candidatos_tecnico_mi_taller(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol not in {"taller", "admin"}:
+        raise HTTPException(status_code=403, detail="Solo taller/admin puede listar candidatos técnicos")
+
+    rol_tecnico = db.query(Rol).filter(Rol.nombre == "tecnico").first()
+    if not rol_tecnico:
+        return []
+
+    usuarios = (
+        db.query(Usuario)
+        .join(UsuarioRol, UsuarioRol.usuario_id == Usuario.id)
+        .outerjoin(Tecnico, Tecnico.usuario_id == Usuario.id)
+        .filter(UsuarioRol.rol_id == rol_tecnico.id)
+        .filter(Tecnico.id == None)  # noqa: E711
+        .order_by(Usuario.creado_en.desc())
+        .all()
+    )
+    return [TecnicoCandidatoOut(id=u.id, nombre=u.nombre, email=u.email) for u in usuarios]
 
 
 @router.get("/mi-taller/historial-atenciones", response_model=list[HistorialAtencionOut])
@@ -435,3 +516,30 @@ def listar_servicios_activos(
             )
         )
     return out
+
+
+@router.patch("/tecnicos/mi-ubicacion")
+def actualizar_mi_ubicacion_tecnico(
+    payload: UbicacionTecnicoIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "tecnico":
+        raise HTTPException(status_code=403, detail="Solo técnico puede reportar su ubicación")
+
+    tecnico = _obtener_tecnico_de_usuario(db, current_user)
+    if not tecnico:
+        raise HTTPException(status_code=404, detail="No existe perfil técnico asociado a este usuario")
+
+    tecnico.lat_actual = payload.lat
+    tecnico.lng_actual = payload.lng
+    db.add(tecnico)
+    db.commit()
+    db.refresh(tecnico)
+    return {
+        "ok": True,
+        "tecnico_id": str(tecnico.id),
+        "lat": tecnico.lat_actual,
+        "lng": tecnico.lng_actual,
+        "mensaje": "Ubicación actualizada",
+    }
