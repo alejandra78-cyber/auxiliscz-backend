@@ -27,6 +27,7 @@ from .services import (
     cerrar_sesion,
     iniciar_sesion,
     obtener_permisos_por_rol,
+    obtener_permisos_por_rol_db,
     registrar_usuario,
     resetear_password,
     solicitar_recuperacion_password,
@@ -60,10 +61,10 @@ def logout():
 
 
 @router.get("/roles/{rol}/permisos", response_model=RolPermisoOut)
-def permisos_por_rol(rol: str, current_user=Depends(get_current_user)):
+def permisos_por_rol(rol: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="Solo admin puede consultar permisos")
-    return RolPermisoOut(rol=rol, permisos=obtener_permisos_por_rol(rol))
+    return RolPermisoOut(rol=rol, permisos=obtener_permisos_por_rol_db(db, rol))
 
 
 @router.patch("/roles", response_model=UsuarioOut)

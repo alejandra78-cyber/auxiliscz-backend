@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .api.routes import calificaciones, ia, incidentes, usuarios
+from sqlalchemy import text
 from .api.routes import websocket
 from .packages.admin.routes import router as admin_router
 from .packages.asignacion.routes import router as asignacion_router
@@ -12,6 +12,39 @@ from .packages.taller.routes import router as taller_router
 from .core.database import engine, Base
 
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_incremental_schema() -> None:
+    # Cambios incrementales sin migración destructiva.
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE IF EXISTS asignaciones ADD COLUMN IF NOT EXISTS servicio VARCHAR(100)"))
+        conn.execute(text("ALTER TABLE IF EXISTS tecnicos ADD COLUMN IF NOT EXISTS usuario_id UUID"))
+        conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'fk_tecnicos_usuario_id'
+                  ) THEN
+                    ALTER TABLE tecnicos
+                    ADD CONSTRAINT fk_tecnicos_usuario_id
+                    FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+                  END IF;
+                END$$;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_tecnicos_usuario_id ON tecnicos(usuario_id) WHERE usuario_id IS NOT NULL"
+            )
+        )
+
+
+_ensure_incremental_schema()
 
 app = FastAPI(
     title="AuxilioSCZ API",
@@ -47,12 +80,6 @@ app.include_router(emergencia_router,     prefix="/api/emergencias",    tags=["E
 app.include_router(asignacion_router,     prefix="/api/asignacion",     tags=["Asignación"])
 app.include_router(pagos_router,          prefix="/api/pagos",          tags=["Pagos"])
 app.include_router(admin_router,          prefix="/api/admin",          tags=["Admin"])
-
-# Compatibilidad de rutas legacy aún usadas por componentes existentes.
-app.include_router(usuarios.router,       prefix="/api/usuarios",       tags=["Usuarios (Legacy)"])
-app.include_router(incidentes.router,     prefix="/api/incidentes",     tags=["Incidentes (Legacy)"])
-app.include_router(ia.router,             prefix="/api/ia",             tags=["IA (Legacy)"])
-app.include_router(calificaciones.router, prefix="/api/calificaciones", tags=["Calificaciones (Legacy)"])
 
 # WebSockets
 app.include_router(websocket.router,      prefix="/api/ws",             tags=["WebSocket"])
