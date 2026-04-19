@@ -1,3 +1,3 @@
-from app.models.models import Incidente, Taller
+from app.models.models import Asignacion, Solicitud, Taller
 
-__all__ = ["Incidente", "Taller"]
+__all__ = ["Solicitud", "Asignacion", "Taller"]
