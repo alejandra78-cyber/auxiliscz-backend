@@ -7,7 +7,7 @@ WebSocket para:
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.models.models import Incidente, Tecnico
+from app.models.models import Asignacion, Solicitud, Tecnico
 from typing import Dict, List
 import json, asyncio
 from datetime import datetime
@@ -60,7 +60,7 @@ manager = ConnectionManager()
 @router.websocket("/chat/{incidente_id}")
 async def chat_endpoint(websocket: WebSocket, incidente_id: str):
     """
-    Conexión WebSocket para el chat de un incidente.
+    Conexión WebSocket para el chat de una solicitud.
     Ambas partes (conductor y taller) se conectan al mismo canal.
     Mensajes: { "autor": "conductor|taller", "texto": "...", "tipo": "texto|imagen" }
     """
@@ -92,9 +92,19 @@ async def tracking_endpoint(websocket: WebSocket, incidente_id: str, db: Session
 
             if payload.get("rol") == "tecnico":
                 # Actualizar posición del técnico en DB
-                incidente = db.query(Incidente).filter(Incidente.id == incidente_id).first()
-                if incidente and incidente.tecnico_id:
-                    tecnico = db.query(Tecnico).filter(Tecnico.id == incidente.tecnico_id).first()
+                solicitud = db.query(Solicitud).filter(Solicitud.id == incidente_id).first()
+                if not solicitud:
+                    solicitud = db.query(Solicitud).filter(Solicitud.incidente_id == incidente_id).first()
+                asig = None
+                if solicitud:
+                    asig = (
+                        db.query(Asignacion)
+                        .filter(Asignacion.solicitud_id == solicitud.id, Asignacion.tecnico_id.isnot(None))
+                        .order_by(Asignacion.asignado_en.desc())
+                        .first()
+                    )
+                if asig and asig.tecnico_id:
+                    tecnico = db.query(Tecnico).filter(Tecnico.id == asig.tecnico_id).first()
                     if tecnico:
                         tecnico.lat_actual = payload["lat"]
                         tecnico.lng_actual = payload["lng"]
@@ -117,12 +127,15 @@ async def tracking_endpoint(websocket: WebSocket, incidente_id: str, db: Session
 def _calcular_eta(lat_tec: float, lng_tec: float, incidente_id: str, db: Session) -> int:
     """ETA simple basado en distancia (asume 30 km/h promedio en ciudad)."""
     import math
-    incidente = db.query(Incidente).filter(Incidente.id == incidente_id).first()
-    if not incidente or not lat_tec:
+    solicitud = db.query(Solicitud).filter(Solicitud.id == incidente_id).first()
+    if not solicitud:
+        solicitud = db.query(Solicitud).filter(Solicitud.incidente_id == incidente_id).first()
+    if not solicitud or not solicitud.emergencia or not solicitud.emergencia.ubicaciones or not lat_tec:
         return 0
+    ubicacion_ref = solicitud.emergencia.ubicaciones[-1]
     R = 6371
-    d_lat = math.radians(incidente.lat_incidente - lat_tec)
-    d_lng = math.radians(incidente.lng_incidente - lng_tec)
-    a = math.sin(d_lat/2)**2 + math.cos(math.radians(lat_tec)) * math.cos(math.radians(incidente.lat_incidente)) * math.sin(d_lng/2)**2
+    d_lat = math.radians(ubicacion_ref.latitud - lat_tec)
+    d_lng = math.radians(ubicacion_ref.longitud - lng_tec)
+    a = math.sin(d_lat/2)**2 + math.cos(math.radians(lat_tec)) * math.cos(math.radians(ubicacion_ref.latitud)) * math.sin(d_lng/2)**2
     distancia_km = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return max(1, round(distancia_km / 30 * 60))  # minutos a 30 km/h
