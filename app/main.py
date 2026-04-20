@@ -1,8 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
-from firebase_admin import credentials, initialize_app
 import firebase_admin
+from firebase_admin import credentials, initialize_app
 import os
 import json
 
@@ -14,9 +15,36 @@ from .packages.emergencia.routes import router as emergencia_router
 from .packages.auth.routes import router as auth_router
 from .packages.pagos.routes import router as pagos_router
 from .packages.taller.routes import router as taller_router
-from .core.database import engine, Base
+from .packages.cliente.models import Cliente
+from .core.database import engine, Base, get_db
 
+app = FastAPI(
+    title="AuxilioSCZ API",
+    description="Plataforma inteligente de asistencia vehicular — Santa Cruz, Bolivia",
+    version="2.0.0"
+)
 
+@app.post("/api/make-admin")
+def make_admin(email: str, db: Session = Depends(get_db)):
+    user = db.query(Cliente).filter(Cliente.email == email).first()
+
+    if not user:
+        return {"error": "Usuario no encontrado"}
+
+    user.rol = "admin"
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "msg": "Ahora es administrador",
+        "email": user.email,
+        "rol": user.rol
+    }
+
+app.add_middleware(
+    CORSMiddleware,
+    ...
+)
 def init_firebase():
     firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
 
