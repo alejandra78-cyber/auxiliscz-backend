@@ -21,23 +21,16 @@ def init_firebase():
     firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
 
     if firebase_json:
-        # 🔵 Railway (usa variable)
         cred_dict = json.loads(firebase_json)
         cred = credentials.Certificate(cred_dict)
     else:
-        # 🟢 Local (usa archivo)
         cred = credentials.Certificate("firebase-credentials.json")
 
     if not firebase_admin._apps:
         initialize_app(cred)
 
 
-init_firebase()
-
-Base.metadata.create_all(bind=engine)
-
-
-def _ensure_incremental_schema() -> None:
+def ensure_incremental_schema() -> None:
     with engine.begin() as conn:
         inspector = inspect(conn)
         tables = set(inspector.get_table_names())
@@ -45,12 +38,16 @@ def _ensure_incremental_schema() -> None:
         if "asignaciones" in tables:
             cols_asig = {c["name"] for c in inspector.get_columns("asignaciones")}
             if "servicio" not in cols_asig:
-                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN servicio VARCHAR(100)"))
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN servicio VARCHAR(100)")
+                )
 
         if "tecnicos" in tables:
             cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}
             if "usuario_id" not in cols_tec:
-                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN usuario_id UUID"))
+                conn.execute(
+                    text("ALTER TABLE tecnicos ADD COLUMN usuario_id UUID")
+                )
 
         if conn.dialect.name == "postgresql":
             conn.execute(
@@ -71,19 +68,23 @@ def _ensure_incremental_schema() -> None:
                     """
                 )
             )
+
             conn.execute(
                 text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_tecnicos_usuario_id ON tecnicos(usuario_id) WHERE usuario_id IS NOT NULL"
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_tecnicos_usuario_id "
+                    "ON tecnicos(usuario_id) WHERE usuario_id IS NOT NULL"
                 )
             )
 
 
-_ensure_incremental_schema()
+init_firebase()
+Base.metadata.create_all(bind=engine)
+ensure_incremental_schema()
 
 app = FastAPI(
     title="AuxilioSCZ API",
     description="Plataforma inteligente de asistencia vehicular — Santa Cruz, Bolivia",
-    version="2.0.0"
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -103,18 +104,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router,        prefix="/api/auth",        tags=["Autenticación"])
-app.include_router(cliente_router,     prefix="/api/cliente",     tags=["Cliente"])
-app.include_router(cliente_router,     prefix="/api/clientes",    tags=["Cliente (Compat)"])
-app.include_router(taller_router,      prefix="/api/taller",      tags=["Taller"])
-app.include_router(taller_router,      prefix="/api/talleres",    tags=["Taller (Compat)"])
-app.include_router(emergencia_router,  prefix="/api/emergencia",  tags=["Emergencia"])
-app.include_router(emergencia_router,  prefix="/api/emergencias", tags=["Emergencia (Compat)"])
-app.include_router(asignacion_router,  prefix="/api/asignacion",  tags=["Asignación"])
-app.include_router(pagos_router,       prefix="/api/pagos",       tags=["Pagos"])
-app.include_router(admin_router,       prefix="/api/admin",       tags=["Admin"])
+# REST
+app.include_router(auth_router,       prefix="/api/auth",        tags=["Autenticación"])
+app.include_router(cliente_router,    prefix="/api/cliente",     tags=["Cliente"])
+app.include_router(cliente_router,    prefix="/api/clientes",    tags=["Cliente (Compat)"])
+app.include_router(taller_router,     prefix="/api/taller",      tags=["Taller"])
+app.include_router(taller_router,     prefix="/api/talleres",    tags=["Taller (Compat)"])
+app.include_router(emergencia_router, prefix="/api/emergencia",  tags=["Emergencia"])
+app.include_router(emergencia_router, prefix="/api/emergencias", tags=["Emergencia (Compat)"])
+app.include_router(asignacion_router, prefix="/api/asignacion",  tags=["Asignación"])
+app.include_router(pagos_router,      prefix="/api/pagos",       tags=["Pagos"])
+app.include_router(admin_router,      prefix="/api/admin",       tags=["Admin"])
 
-app.include_router(websocket.router,   prefix="/api/ws",          tags=["WebSocket"])
+# WebSocket
+app.include_router(websocket.router,  prefix="/api/ws",          tags=["WebSocket"])
+
 
 @app.get("/")
 def root():
