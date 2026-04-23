@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.models.models import Rol, RolPermiso, Usuario, UsuarioRol
 
@@ -8,7 +9,7 @@ def get_usuario_by_id(db: Session, usuario_id: str) -> Usuario | None:
 
 
 def get_usuario_by_email(db: Session, email: str) -> Usuario | None:
-    return db.query(Usuario).filter(Usuario.email == email).first()
+    return db.query(Usuario).filter(func.lower(Usuario.email) == email.strip().lower()).first()
 
 
 def crear_usuario(

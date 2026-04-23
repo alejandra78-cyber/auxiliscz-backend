@@ -84,6 +84,94 @@ def _ensure_incremental_schema() -> None:
                     )
                 )
 
+        if "solicitudes_taller" not in tables:
+            if conn.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS solicitudes_taller (
+                            id UUID PRIMARY KEY,
+                            nombre_taller VARCHAR(120) NOT NULL,
+                            responsable_nombre VARCHAR(120) NOT NULL,
+                            responsable_email VARCHAR(150) NOT NULL,
+                            responsable_telefono VARCHAR(30) NOT NULL,
+                            direccion VARCHAR(255),
+                            latitud DOUBLE PRECISION,
+                            longitud DOUBLE PRECISION,
+                            servicios TEXT,
+                            descripcion TEXT,
+                            estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
+                            observaciones TEXT,
+                            creado_en TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                            revisado_en TIMESTAMP WITHOUT TIME ZONE,
+                            revisado_por UUID REFERENCES usuarios(id),
+                            usuario_id UUID REFERENCES usuarios(id),
+                            taller_id UUID REFERENCES talleres(id)
+                        )
+                        """
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS solicitudes_taller (
+                            id CHAR(36) PRIMARY KEY,
+                            nombre_taller VARCHAR(120) NOT NULL,
+                            responsable_nombre VARCHAR(120) NOT NULL,
+                            responsable_email VARCHAR(150) NOT NULL,
+                            responsable_telefono VARCHAR(30) NOT NULL,
+                            direccion VARCHAR(255),
+                            latitud FLOAT,
+                            longitud FLOAT,
+                            servicios TEXT,
+                            descripcion TEXT,
+                            estado VARCHAR(20) NOT NULL DEFAULT 'pendiente',
+                            observaciones TEXT,
+                            creado_en DATETIME,
+                            revisado_en DATETIME,
+                            revisado_por CHAR(36),
+                            usuario_id CHAR(36),
+                            taller_id CHAR(36)
+                        )
+                        """
+                    )
+                )
+
+        if "password_reset_tokens" not in tables:
+            if conn.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                            id UUID PRIMARY KEY,
+                            usuario_id UUID NOT NULL REFERENCES usuarios(id),
+                            token_hash VARCHAR(128) NOT NULL UNIQUE,
+                            scope VARCHAR(40) NOT NULL DEFAULT 'password_recovery',
+                            expires_en TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                            usado_en TIMESTAMP WITHOUT TIME ZONE,
+                            creado_en TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                            id CHAR(36) PRIMARY KEY,
+                            usuario_id CHAR(36) NOT NULL REFERENCES usuarios(id),
+                            token_hash VARCHAR(128) NOT NULL UNIQUE,
+                            scope VARCHAR(40) NOT NULL DEFAULT 'password_recovery',
+                            expires_en DATETIME NOT NULL,
+                            usado_en DATETIME,
+                            creado_en DATETIME
+                        )
+                        """
+                    )
+                )
+
         if "asignaciones" in tables:
             cols_asig = {c["name"] for c in inspector.get_columns("asignaciones")}
             if "servicio" not in cols_asig:
@@ -99,6 +187,37 @@ def _ensure_incremental_schema() -> None:
             cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}
             if "usuario_id" not in cols_tec:
                 conn.execute(text("ALTER TABLE tecnicos ADD COLUMN usuario_id UUID"))
+
+        if "talleres" in tables:
+            cols_taller = {c["name"] for c in inspector.get_columns("talleres")}
+            if "estado_aprobacion" not in cols_taller:
+                conn.execute(
+                    text("ALTER TABLE talleres ADD COLUMN estado_aprobacion VARCHAR(20) NOT NULL DEFAULT 'pendiente'")
+                )
+            if "aprobado_por" not in cols_taller:
+                conn.execute(
+                    text("ALTER TABLE talleres ADD COLUMN aprobado_por UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE talleres ADD COLUMN aprobado_por CHAR(36)")
+                )
+            if "aprobado_en" not in cols_taller:
+                conn.execute(
+                    text("ALTER TABLE talleres ADD COLUMN aprobado_en TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE talleres ADD COLUMN aprobado_en DATETIME")
+                )
+            if "creado_en" not in cols_taller:
+                conn.execute(
+                    text("ALTER TABLE talleres ADD COLUMN creado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE talleres ADD COLUMN creado_en DATETIME")
+                )
+            if "actualizado_en" not in cols_taller:
+                conn.execute(
+                    text("ALTER TABLE talleres ADD COLUMN actualizado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE talleres ADD COLUMN actualizado_en DATETIME")
+                )
 
         fk_targets = [
             ("solicitudes", "incidente_id"),
@@ -163,6 +282,75 @@ def _ensure_incremental_schema() -> None:
                         ALTER TABLE tecnicos
                         ADD CONSTRAINT fk_tecnicos_usuario_id
                         FOREIGN KEY (usuario_id) REFERENCES usuarios(id);
+                      END IF;
+                    END$$;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_solicitudes_taller_estado_creado_en
+                    ON solicitudes_taller(estado, creado_en DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_solicitudes_taller_email
+                    ON solicitudes_taller(lower(responsable_email))
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_usuario_scope
+                    ON password_reset_tokens(usuario_id, scope)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='talleres' AND column_name='aprobado_por'
+                      ) AND NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_talleres_aprobado_por'
+                      ) THEN
+                        ALTER TABLE talleres
+                        ADD CONSTRAINT fk_talleres_aprobado_por
+                        FOREIGN KEY (aprobado_por) REFERENCES usuarios(id) NOT VALID;
+                      END IF;
+                    END$$;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1 FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relkind = 'i'
+                          AND c.relname = 'ux_talleres_usuario_id'
+                          AND n.nspname = 'public'
+                      ) AND NOT EXISTS (
+                        SELECT usuario_id
+                        FROM talleres
+                        WHERE usuario_id IS NOT NULL
+                        GROUP BY usuario_id
+                        HAVING COUNT(*) > 1
+                      ) THEN
+                        CREATE UNIQUE INDEX ux_talleres_usuario_id ON talleres(usuario_id);
                       END IF;
                     END$$;
                     """

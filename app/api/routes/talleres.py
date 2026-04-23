@@ -1,22 +1,29 @@
 import json
+import os
+import secrets
 import uuid
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, get_password_hash
+from app.core.time import local_now_naive
+from app.packages.auth.services import generar_token_activacion_cuenta
 from app.models.models import (
     Asignacion,
+    Auditoria,
     Cliente,
     Cotizacion,
     Emergencia,
     Historial,
     Notificacion,
     Rol,
+    SolicitudTaller,
     Solicitud,
     Taller,
     Tecnico,
@@ -24,22 +31,28 @@ from app.models.models import (
     Usuario,
     UsuarioRol,
 )
+from app.services.emailer import enviar_email
 
 router = APIRouter()
 
 
 class TallerCreate(BaseModel):
-    usuario_id: str
+    usuario_id: str | None = None
     nombre: str = Field(..., min_length=3)
     direccion: str | None = None
     latitud: float | None = None
     longitud: float | None = None
     servicios: list[str] = Field(default_factory=list)
     disponible: bool = True
+    responsable_nombre: str | None = Field(default=None, min_length=3)
+    responsable_email: EmailStr | None = None
+    responsable_telefono: str | None = None
+    password_temporal: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 class TallerOut(BaseModel):
     id: UUID
+    usuario_id: UUID
     nombre: str
     direccion: str | None = None
     latitud: float | None = None
@@ -47,6 +60,12 @@ class TallerOut(BaseModel):
     servicios: list[str]
     disponible: bool
     calificacion: float
+    estado_aprobacion: str
+    aprobado_por: UUID | None = None
+    aprobado_en: str | None = None
+    responsable_nombre: str | None = None
+    responsable_email: str | None = None
+    responsable_telefono: str | None = None
 
     class Config:
         from_attributes = True
@@ -113,12 +132,177 @@ class ServicioActivoOut(BaseModel):
     cliente: str | None = None
 
 
+class TallerAprobacionIn(BaseModel):
+    comentario: str | None = None
+
+
+class TallerAprobacionOut(BaseModel):
+    taller_id: UUID
+    estado_aprobacion: str
+    aprobado_por: UUID | None = None
+    aprobado_en: str | None = None
+
+
+class SolicitudAfiliacionPublicIn(BaseModel):
+    nombre_taller: str = Field(..., min_length=3)
+    responsable_nombre: str = Field(..., min_length=3)
+    responsable_email: EmailStr
+    responsable_telefono: str = Field(..., min_length=6, max_length=30)
+    direccion: str | None = None
+    latitud: float | None = None
+    longitud: float | None = None
+    servicios: list[str] = Field(default_factory=list)
+    descripcion: str | None = None
+
+
+class SolicitudAfiliacionOut(BaseModel):
+    id: UUID
+    nombre_taller: str
+    responsable_nombre: str
+    responsable_email: str
+    responsable_telefono: str
+    direccion: str | None = None
+    latitud: float | None = None
+    longitud: float | None = None
+    servicios: list[str]
+    descripcion: str | None = None
+    estado: str
+    observaciones: str | None = None
+    creado_en: str
+    revisado_en: str | None = None
+    revisado_por: UUID | None = None
+    usuario_id: UUID | None = None
+    taller_id: UUID | None = None
+
+
+class SolicitudAfiliacionRevisionIn(BaseModel):
+    observaciones: str | None = None
+
+
 def _parsear_servicios(taller: Taller) -> Taller:
     try:
         taller.servicios = json.loads(taller.servicios or "[]")
     except Exception:
         taller.servicios = []
     return taller
+
+
+def _to_taller_out(taller: Taller) -> TallerOut:
+    parsed = _parsear_servicios(taller)
+    aprobado_en = parsed.aprobado_en.isoformat() if getattr(parsed, "aprobado_en", None) else None
+    return TallerOut(
+        id=parsed.id,
+        usuario_id=parsed.usuario_id,
+        nombre=parsed.nombre,
+        direccion=parsed.direccion,
+        latitud=parsed.latitud,
+        longitud=parsed.longitud,
+        servicios=parsed.servicios,
+        disponible=parsed.disponible,
+        calificacion=parsed.calificacion,
+        estado_aprobacion=getattr(parsed, "estado_aprobacion", "pendiente") or "pendiente",
+        aprobado_por=getattr(parsed, "aprobado_por", None),
+        aprobado_en=aprobado_en,
+        responsable_nombre=parsed.usuario.nombre if parsed.usuario else None,
+        responsable_email=parsed.usuario.email if parsed.usuario else None,
+        responsable_telefono=parsed.usuario.telefono if parsed.usuario else None,
+    )
+
+
+def _parse_servicios_raw(servicios: str | list[str] | None) -> list[str]:
+    if isinstance(servicios, list):
+        return servicios
+    if not servicios:
+        return []
+    try:
+        parsed = json.loads(servicios)
+        if isinstance(parsed, list):
+            return [str(s).strip() for s in parsed if str(s).strip()]
+    except Exception:
+        pass
+    return [s.strip() for s in str(servicios).split(",") if s.strip()]
+
+
+def _to_solicitud_afiliacion_out(row: SolicitudTaller) -> SolicitudAfiliacionOut:
+    return SolicitudAfiliacionOut(
+        id=row.id,
+        nombre_taller=row.nombre_taller,
+        responsable_nombre=row.responsable_nombre,
+        responsable_email=row.responsable_email,
+        responsable_telefono=row.responsable_telefono,
+        direccion=row.direccion,
+        latitud=row.latitud,
+        longitud=row.longitud,
+        servicios=_parse_servicios_raw(row.servicios),
+        descripcion=row.descripcion,
+        estado=row.estado,
+        observaciones=row.observaciones,
+        creado_en=row.creado_en.isoformat() if row.creado_en else local_now_naive().isoformat(),
+        revisado_en=row.revisado_en.isoformat() if row.revisado_en else None,
+        revisado_por=row.revisado_por,
+        usuario_id=row.usuario_id,
+        taller_id=row.taller_id,
+    )
+
+
+def _asegurar_rol_taller(db: Session, usuario: Usuario) -> None:
+    rol_taller = db.query(Rol).filter(Rol.nombre == "taller").first()
+    if not rol_taller:
+        rol_taller = Rol(nombre="taller", descripcion="Rol taller")
+        db.add(rol_taller)
+        db.flush()
+    db.query(UsuarioRol).filter(UsuarioRol.usuario_id == usuario.id).delete()
+    db.add(UsuarioRol(usuario_id=usuario.id, rol_id=rol_taller.id))
+    db.flush()
+
+
+def _resolve_or_create_taller_user(
+    db: Session,
+    *,
+    usuario_id: str | None,
+    responsable_nombre: str | None,
+    responsable_email: str | None,
+    responsable_telefono: str | None,
+    password_temporal: str | None,
+) -> tuple[Usuario, bool]:
+    if usuario_id:
+        usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="El usuario indicado no existe")
+        _asegurar_rol_taller(db, usuario)
+        return usuario, False
+
+    if not responsable_email or not responsable_nombre:
+        raise HTTPException(
+            status_code=422,
+            detail="Debes enviar usuario_id o responsable_email + responsable_nombre",
+        )
+
+    email_normalizado = responsable_email.strip().lower()
+    usuario = db.query(Usuario).filter(func.lower(Usuario.email) == email_normalizado).first()
+    was_created = False
+    if not usuario:
+        clave_tmp = password_temporal or f"Taller-{secrets.token_urlsafe(10)}"
+        usuario = Usuario(
+            nombre=responsable_nombre.strip(),
+            email=email_normalizado,
+            password_hash=get_password_hash(clave_tmp),
+            telefono=responsable_telefono,
+            estado="pendiente",
+        )
+        db.add(usuario)
+        db.flush()
+        was_created = True
+    else:
+        if responsable_nombre:
+            usuario.nombre = responsable_nombre.strip()
+        if responsable_telefono:
+            usuario.telefono = responsable_telefono
+        db.add(usuario)
+        db.flush()
+
+    _asegurar_rol_taller(db, usuario)
+    return usuario, was_created
 
 
 def _obtener_taller_de_usuario(db: Session, current_user: Usuario) -> Taller:
@@ -148,6 +332,225 @@ def _obtener_tecnico_de_usuario(db: Session, current_user: Usuario) -> Tecnico |
     return db.query(Tecnico).filter(Tecnico.nombre == current_user.nombre).first()
 
 
+@router.post("/solicitudes-afiliacion", response_model=SolicitudAfiliacionOut)
+def registrar_solicitud_afiliacion_publica(
+    payload: SolicitudAfiliacionPublicIn,
+    db: Session = Depends(get_db),
+):
+    email = payload.responsable_email.strip().lower()
+    existe_pendiente = (
+        db.query(SolicitudTaller)
+        .filter(func.lower(SolicitudTaller.responsable_email) == email)
+        .filter(SolicitudTaller.estado == "pendiente")
+        .first()
+    )
+    if existe_pendiente:
+        raise HTTPException(
+            status_code=409,
+            detail="Ya existe una solicitud pendiente para este correo",
+        )
+
+    solicitud = SolicitudTaller(
+        nombre_taller=payload.nombre_taller.strip(),
+        responsable_nombre=payload.responsable_nombre.strip(),
+        responsable_email=email,
+        responsable_telefono=payload.responsable_telefono.strip(),
+        direccion=payload.direccion,
+        latitud=payload.latitud,
+        longitud=payload.longitud,
+        servicios=json.dumps(payload.servicios),
+        descripcion=payload.descripcion,
+        estado="pendiente",
+    )
+    db.add(solicitud)
+    db.flush()
+    db.add(
+        Auditoria(
+            usuario_id=None,
+            accion="solicitud_taller_creada",
+            modulo="talleres",
+            detalle=f"Solicitud pública creada para {solicitud.responsable_email}",
+        )
+    )
+    db.commit()
+    db.refresh(solicitud)
+    return _to_solicitud_afiliacion_out(solicitud)
+
+
+@router.get("/admin/solicitudes-afiliacion", response_model=list[SolicitudAfiliacionOut])
+def listar_solicitudes_afiliacion_admin(
+    estado: str | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede listar solicitudes")
+    q = db.query(SolicitudTaller).order_by(SolicitudTaller.creado_en.desc())
+    if estado:
+        q = q.filter(SolicitudTaller.estado == estado)
+    return [_to_solicitud_afiliacion_out(x) for x in q.all()]
+
+
+@router.get("/admin/solicitudes-afiliacion/{solicitud_id}", response_model=SolicitudAfiliacionOut)
+def detalle_solicitud_afiliacion_admin(
+    solicitud_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede ver detalle de solicitudes")
+    solicitud = db.query(SolicitudTaller).filter(SolicitudTaller.id == solicitud_id).first()
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    return _to_solicitud_afiliacion_out(solicitud)
+
+
+@router.patch("/admin/solicitudes-afiliacion/{solicitud_id}/aprobar", response_model=SolicitudAfiliacionOut)
+def aprobar_solicitud_afiliacion_admin(
+    solicitud_id: str,
+    payload: SolicitudAfiliacionRevisionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede aprobar solicitudes")
+    solicitud = db.query(SolicitudTaller).filter(SolicitudTaller.id == solicitud_id).first()
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    if solicitud.estado != "pendiente":
+        raise HTTPException(status_code=409, detail="Solo se pueden aprobar solicitudes pendientes")
+
+    usuario, usuario_creado = _resolve_or_create_taller_user(
+        db,
+        usuario_id=None,
+        responsable_nombre=solicitud.responsable_nombre,
+        responsable_email=solicitud.responsable_email,
+        responsable_telefono=solicitud.responsable_telefono,
+        password_temporal=None,
+    )
+
+    taller_existente = db.query(Taller).filter(Taller.usuario_id == usuario.id).first()
+    if taller_existente:
+        taller = taller_existente
+        taller.nombre = solicitud.nombre_taller
+        taller.direccion = solicitud.direccion
+        taller.latitud = solicitud.latitud
+        taller.longitud = solicitud.longitud
+        taller.servicios = solicitud.servicios
+        taller.disponible = True
+        taller.estado_aprobacion = "aprobado"
+        taller.aprobado_por = current_user.id
+        taller.aprobado_en = local_now_naive()
+    else:
+        taller = Taller(
+            usuario_id=usuario.id,
+            nombre=solicitud.nombre_taller,
+            direccion=solicitud.direccion,
+            latitud=solicitud.latitud,
+            longitud=solicitud.longitud,
+            servicios=solicitud.servicios,
+            disponible=True,
+            estado_aprobacion="aprobado",
+            aprobado_por=current_user.id,
+            aprobado_en=local_now_naive(),
+        )
+        db.add(taller)
+        db.flush()
+
+    usuario.estado = "pendiente_activacion"
+    db.add(usuario)
+
+    solicitud.estado = "aprobado"
+    solicitud.revisado_en = local_now_naive()
+    solicitud.revisado_por = current_user.id
+    solicitud.observaciones = payload.observaciones
+    solicitud.usuario_id = usuario.id
+    solicitud.taller_id = taller.id
+    db.add(solicitud)
+
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="solicitud_taller_aprobada",
+            modulo="talleres",
+            detalle=f"Solicitud {solicitud.id} aprobada. Usuario {'creado' if usuario_creado else 'reutilizado'}: {usuario.email}",
+        )
+    )
+    db.add(
+        Notificacion(
+            id=uuid.uuid4(),
+            usuario_id=usuario.id,
+            titulo="Afiliación de taller aprobada",
+            mensaje=f"Tu taller '{taller.nombre}' fue aprobado. Revisa tu correo para crear contraseña y activar acceso.",
+            tipo="onboarding_taller",
+            estado="no_leida",
+        )
+    )
+    token_activacion = generar_token_activacion_cuenta(
+        db,
+        str(usuario.id),
+        minutes=60 * 24,
+        commit=False,
+    )
+    frontend_url = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").rstrip("/")
+    activation_url = f"{frontend_url}/recover-password?reset_token={token_activacion}&mode=activation"
+    mail_ok = enviar_email(
+        usuario.email,
+        "AuxilioSCZ - Taller aprobado, activa tu cuenta",
+        (
+            f"Hola {usuario.nombre},\n\n"
+            f"Tu solicitud para el taller '{taller.nombre}' fue aprobada.\n"
+            "Para activar tu cuenta y crear tu contraseña, ingresa al siguiente enlace:\n\n"
+            f"{activation_url}\n\n"
+            "Este enlace expira en 24 horas.\n"
+        ),
+    )
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="correo_activacion_taller",
+            modulo="talleres",
+            detalle=f"Correo de activación {'enviado' if mail_ok else 'no_enviado'} a {usuario.email}",
+        )
+    )
+    db.commit()
+    db.refresh(solicitud)
+    return _to_solicitud_afiliacion_out(solicitud)
+
+
+@router.patch("/admin/solicitudes-afiliacion/{solicitud_id}/rechazar", response_model=SolicitudAfiliacionOut)
+def rechazar_solicitud_afiliacion_admin(
+    solicitud_id: str,
+    payload: SolicitudAfiliacionRevisionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede rechazar solicitudes")
+    solicitud = db.query(SolicitudTaller).filter(SolicitudTaller.id == solicitud_id).first()
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    if solicitud.estado != "pendiente":
+        raise HTTPException(status_code=409, detail="Solo se pueden rechazar solicitudes pendientes")
+
+    solicitud.estado = "rechazado"
+    solicitud.revisado_en = local_now_naive()
+    solicitud.revisado_por = current_user.id
+    solicitud.observaciones = payload.observaciones
+    db.add(solicitud)
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="solicitud_taller_rechazada",
+            modulo="talleres",
+            detalle=f"Solicitud {solicitud.id} rechazada",
+        )
+    )
+    db.commit()
+    db.refresh(solicitud)
+    return _to_solicitud_afiliacion_out(solicitud)
+
+
 @router.post("/", response_model=TallerOut)
 def crear_taller(
     datos: TallerCreate,
@@ -157,46 +560,193 @@ def crear_taller(
     if current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="Solo admin puede crear talleres")
 
-    usuario_taller = db.query(Usuario).filter(Usuario.id == datos.usuario_id).first()
-    if not usuario_taller:
-        raise HTTPException(status_code=404, detail="El usuario indicado no existe")
-    if usuario_taller.rol != "taller":
-        raise HTTPException(status_code=400, detail="El usuario indicado debe tener rol 'taller'")
-
-    taller_existente = db.query(Taller).filter(Taller.usuario_id == datos.usuario_id).first()
-    if taller_existente:
-        raise HTTPException(status_code=400, detail="El usuario ya tiene un taller registrado")
-
-    taller = Taller(
+    usuario_taller, usuario_creado = _resolve_or_create_taller_user(
+        db,
         usuario_id=datos.usuario_id,
-        nombre=datos.nombre,
-        direccion=datos.direccion,
-        latitud=datos.latitud,
-        longitud=datos.longitud,
-        servicios=json.dumps(datos.servicios),
-        disponible=datos.disponible,
+        responsable_nombre=datos.responsable_nombre,
+        responsable_email=str(datos.responsable_email) if datos.responsable_email else None,
+        responsable_telefono=datos.responsable_telefono,
+        password_temporal=datos.password_temporal,
     )
-    try:
+
+    taller = db.query(Taller).filter(Taller.usuario_id == usuario_taller.id).first()
+    if taller:
+        taller.nombre = datos.nombre
+        taller.direccion = datos.direccion
+        taller.latitud = datos.latitud
+        taller.longitud = datos.longitud
+        taller.servicios = json.dumps(datos.servicios)
+        taller.disponible = datos.disponible
+        if taller.estado_aprobacion == "rechazado":
+            taller.estado_aprobacion = "pendiente"
+            taller.aprobado_por = None
+            taller.aprobado_en = None
+        db.add(
+            Auditoria(
+                usuario_id=current_user.id,
+                accion="taller_actualizado_onboarding",
+                modulo="talleres",
+                detalle=f"Taller {taller.nombre} actualizado por admin",
+            )
+        )
+    else:
+        taller = Taller(
+            usuario_id=usuario_taller.id,
+            nombre=datos.nombre,
+            direccion=datos.direccion,
+            latitud=datos.latitud,
+            longitud=datos.longitud,
+            servicios=json.dumps(datos.servicios),
+            disponible=datos.disponible,
+            estado_aprobacion="pendiente",
+            aprobado_por=None,
+            aprobado_en=None,
+        )
         db.add(taller)
+        db.flush()
+        db.add(
+            Auditoria(
+                usuario_id=current_user.id,
+                accion="taller_registrado",
+                modulo="talleres",
+                detalle=f"Taller {datos.nombre} registrado para {usuario_taller.email}",
+            )
+        )
+        db.add(
+            Auditoria(
+                usuario_id=current_user.id,
+                accion="taller_usuario_resuelto",
+                modulo="talleres",
+                detalle=f"Usuario {'creado' if usuario_creado else 'reutilizado'} para onboarding de taller: {usuario_taller.email}",
+            )
+        )
+    try:
         db.commit()
         db.refresh(taller)
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="No se pudo registrar el taller por datos inválidos")
-    return _parsear_servicios(taller)
+    return _to_taller_out(taller)
 
 
 @router.get("/", response_model=list[TallerOut])
 def listar_talleres(db: Session = Depends(get_db)):
-    talleres = db.query(Taller).all()
-    return [_parsear_servicios(taller) for taller in talleres]
+    talleres = db.query(Taller).options(joinedload(Taller.usuario)).all()
+    return [_to_taller_out(taller) for taller in talleres]
+
+
+@router.get("/admin/onboarding", response_model=list[TallerOut])
+def listar_talleres_onboarding(
+    estado: str | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede listar onboarding de talleres")
+    q = db.query(Taller).options(joinedload(Taller.usuario))
+    if estado:
+        q = q.filter(Taller.estado_aprobacion == estado)
+    q = q.order_by(Taller.creado_en.desc())
+    return [_to_taller_out(t) for t in q.all()]
+
+
+@router.patch("/admin/{taller_id}/aprobar", response_model=TallerAprobacionOut)
+def aprobar_taller(
+    taller_id: str,
+    payload: TallerAprobacionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede aprobar talleres")
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+    if not taller:
+        raise HTTPException(status_code=404, detail="Taller no encontrado")
+    taller.estado_aprobacion = "aprobado"
+    taller.aprobado_por = current_user.id
+    taller.aprobado_en = local_now_naive()
+    if taller.usuario:
+        taller.usuario.estado = "activo"
+    db.add(taller)
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="taller_aprobado",
+            modulo="talleres",
+            detalle=f"Taller {taller.nombre} aprobado. {payload.comentario or ''}".strip(),
+        )
+    )
+    if taller.usuario:
+        db.add(
+            Notificacion(
+                id=uuid.uuid4(),
+                usuario_id=taller.usuario.id,
+                titulo="Taller aprobado",
+                mensaje=f"Tu taller '{taller.nombre}' fue aprobado y ya está habilitado.",
+                tipo="onboarding_taller",
+                estado="no_leida",
+            )
+        )
+    db.commit()
+    db.refresh(taller)
+    return TallerAprobacionOut(
+        taller_id=taller.id,
+        estado_aprobacion=taller.estado_aprobacion,
+        aprobado_por=taller.aprobado_por,
+        aprobado_en=taller.aprobado_en.isoformat() if taller.aprobado_en else None,
+    )
+
+
+@router.patch("/admin/{taller_id}/rechazar", response_model=TallerAprobacionOut)
+def rechazar_taller(
+    taller_id: str,
+    payload: TallerAprobacionIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede rechazar talleres")
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+    if not taller:
+        raise HTTPException(status_code=404, detail="Taller no encontrado")
+    taller.estado_aprobacion = "rechazado"
+    taller.aprobado_por = current_user.id
+    taller.aprobado_en = local_now_naive()
+    db.add(taller)
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="taller_rechazado",
+            modulo="talleres",
+            detalle=f"Taller {taller.nombre} rechazado. {payload.comentario or ''}".strip(),
+        )
+    )
+    if taller.usuario:
+        db.add(
+            Notificacion(
+                id=uuid.uuid4(),
+                usuario_id=taller.usuario.id,
+                titulo="Taller rechazado",
+                mensaje=f"Tu taller '{taller.nombre}' fue rechazado. Revisa observaciones con administración.",
+                tipo="onboarding_taller",
+                estado="no_leida",
+            )
+        )
+    db.commit()
+    db.refresh(taller)
+    return TallerAprobacionOut(
+        taller_id=taller.id,
+        estado_aprobacion=taller.estado_aprobacion,
+        aprobado_por=taller.aprobado_por,
+        aprobado_en=taller.aprobado_en.isoformat() if taller.aprobado_en else None,
+    )
 
 
 @router.get("/mi-taller", response_model=TallerOut)
 def mi_taller(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if current_user.rol != "taller":
         raise HTTPException(status_code=403, detail="Solo un taller puede consultar esta información")
-    return _parsear_servicios(_obtener_taller_de_usuario(db, current_user))
+    return _to_taller_out(_obtener_taller_de_usuario(db, current_user))
 
 
 @router.patch("/mi-taller/disponibilidad", response_model=TallerOut)
@@ -213,7 +763,7 @@ def cambiar_disponibilidad(
     db.add(taller)
     db.commit()
     db.refresh(taller)
-    return _parsear_servicios(taller)
+    return _to_taller_out(taller)
 
 
 @router.post("/mi-taller/tecnicos", response_model=TecnicoOut)

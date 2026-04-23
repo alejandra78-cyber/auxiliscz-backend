@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-LOCAL_TZ = ZoneInfo("America/La_Paz")
+try:
+    LOCAL_TZ = ZoneInfo("America/La_Paz")
+except ZoneInfoNotFoundError:
+    # Fallback robusto para entornos Windows sin base tzdata instalada.
+    LOCAL_TZ = timezone(timedelta(hours=-4), name="America/La_Paz")
 
 
 def local_now() -> datetime:

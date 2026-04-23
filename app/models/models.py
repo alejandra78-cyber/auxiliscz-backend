@@ -19,13 +19,14 @@ class Usuario(Base):
     creado_en = Column(DateTime, default=local_now_naive)
 
     vehiculos = relationship("Vehiculo", back_populates="usuario")
-    taller = relationship("Taller", back_populates="usuario", uselist=False)
+    taller = relationship("Taller", back_populates="usuario", uselist=False, foreign_keys="Taller.usuario_id")
     cliente = relationship("Cliente", back_populates="usuario", uselist=False)
     tecnico = relationship("Tecnico", back_populates="usuario", uselist=False)
     usuario_roles = relationship("UsuarioRol", back_populates="usuario")
     notificaciones = relationship("Notificacion", back_populates="usuario")
     auditorias = relationship("Auditoria", back_populates="usuario")
     mensajes = relationship("Mensaje", back_populates="usuario")
+    password_reset_tokens = relationship("PasswordResetToken", back_populates="usuario")
 
     @property
     def rol(self) -> str:
@@ -92,6 +93,32 @@ class Cliente(Base):
     incidentes = relationship("Incidente", back_populates="cliente")
 
 
+class SolicitudTaller(Base):
+    __tablename__ = "solicitudes_taller"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    nombre_taller = Column(String(120), nullable=False)
+    responsable_nombre = Column(String(120), nullable=False)
+    responsable_email = Column(String(150), nullable=False, index=True)
+    responsable_telefono = Column(String(30), nullable=False)
+    direccion = Column(String(255))
+    latitud = Column(Float)
+    longitud = Column(Float)
+    servicios = Column(Text)
+    descripcion = Column(Text)
+    estado = Column(String(20), default="pendiente", nullable=False)
+    observaciones = Column(Text)
+    creado_en = Column(DateTime, default=local_now_naive, nullable=False)
+    revisado_en = Column(DateTime)
+    revisado_por = Column(GUID(), ForeignKey("usuarios.id"), nullable=True)
+    usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=True)
+    taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True)
+
+    revisor = relationship("Usuario", foreign_keys=[revisado_por])
+    usuario = relationship("Usuario", foreign_keys=[usuario_id])
+    taller = relationship("Taller", foreign_keys=[taller_id])
+
+
 class Taller(Base):
     __tablename__ = "talleres"
 
@@ -104,8 +131,14 @@ class Taller(Base):
     servicios = Column(Text)
     disponible = Column(Boolean, default=True)
     calificacion = Column(Float, default=5.0)
+    estado_aprobacion = Column(String(20), default="pendiente", nullable=False)
+    aprobado_por = Column(GUID(), ForeignKey("usuarios.id"), nullable=True)
+    aprobado_en = Column(DateTime)
+    creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
 
-    usuario = relationship("Usuario", back_populates="taller")
+    usuario = relationship("Usuario", back_populates="taller", foreign_keys=[usuario_id])
+    aprobador = relationship("Usuario", foreign_keys=[aprobado_por])
     tecnicos = relationship("Tecnico", back_populates="taller")
     disponibilidades = relationship("Disponibilidad", back_populates="taller")
     metricas = relationship("Metrica", back_populates="taller")
@@ -423,3 +456,17 @@ class Auditoria(Base):
     fecha = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="auditorias")
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False, index=True)
+    token_hash = Column(String(128), nullable=False, unique=True, index=True)
+    scope = Column(String(40), nullable=False, default="password_recovery")
+    expires_en = Column(DateTime, nullable=False)
+    usado_en = Column(DateTime)
+    creado_en = Column(DateTime, default=local_now_naive, nullable=False)
+
+    usuario = relationship("Usuario", back_populates="password_reset_tokens")
