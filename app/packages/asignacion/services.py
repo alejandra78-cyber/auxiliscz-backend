@@ -20,6 +20,7 @@ from app.models.models import (
     Usuario,
 )
 from app.services.asignacion import listar_candidatos, motor_asignacion
+from app.core.time import local_now_naive
 
 from .schemas import AsignacionDemoOut
 
@@ -156,7 +157,7 @@ def _crear_notificacion_evento(
 
 
 def _incrementar_metrica_taller(db: Session, *, taller_id, codigo: str, delta: float = 1.0) -> None:
-    periodo = datetime.utcnow().strftime("%Y-%m")
+    periodo = local_now_naive().strftime("%Y-%m")
     row = (
         db.query(Metrica)
         .filter(Metrica.taller_id == taller_id, Metrica.codigo == codigo, Metrica.periodo == periodo)
