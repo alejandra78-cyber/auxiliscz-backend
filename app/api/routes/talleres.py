@@ -415,6 +415,7 @@ def completar_servicio(
         Cotizacion(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             monto=payload.costo,
             detalle="Trabajo completado por taller",
             estado="completada",
@@ -424,6 +425,7 @@ def completar_servicio(
         Historial(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             estado_anterior=estado_anterior,
             estado_nuevo=solicitud.estado,
             comentario=payload.observacion or "Trabajo completado por taller",
@@ -434,6 +436,7 @@ def completar_servicio(
             Historial(
                 id=uuid.uuid4(),
                 solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
                 estado_anterior=solicitud.estado,
                 estado_nuevo=solicitud.estado,
                 comentario=f"Evidencia final: {payload.evidencia_texto}",
@@ -444,6 +447,7 @@ def completar_servicio(
             Historial(
                 id=uuid.uuid4(),
                 solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
                 estado_anterior=solicitud.estado,
                 estado_nuevo=solicitud.estado,
                 comentario="Notificación de completado enviada al cliente",
@@ -456,6 +460,7 @@ def completar_servicio(
                 id=uuid.uuid4(),
                 usuario_id=solicitud.cliente.usuario_id,
                 solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
                 titulo="Servicio completado",
                 mensaje=f"Tu solicitud SOL-{str(solicitud.id).split('-')[0].upper()} fue completada",
                 tipo="trabajo_completado",

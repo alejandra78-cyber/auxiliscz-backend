@@ -89,6 +89,7 @@ class Cliente(Base):
 
     usuario = relationship("Usuario", back_populates="cliente")
     solicitudes = relationship("Solicitud", back_populates="cliente")
+    incidentes = relationship("Incidente", back_populates="cliente")
 
 
 class Taller(Base):
@@ -141,13 +142,40 @@ class Vehiculo(Base):
     color = Column(String(40))
 
     usuario = relationship("Usuario", back_populates="vehiculos")
+    incidentes = relationship("Incidente", back_populates="vehiculo")
+
+
+class Incidente(Base):
+    __tablename__ = "incidentes"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=False)
+    vehiculo_id = Column(GUID(), ForeignKey("vehiculos.id"), nullable=False)
+    estado = Column(String(50), default="pendiente", nullable=False)
+    prioridad = Column(Integer, default=2, nullable=False)
+    tipo = Column(String(50), default="incierto", nullable=False)
+    descripcion = Column(Text)
+    canal_origen = Column(String(20), default="api", nullable=False)
+    creado_en = Column(DateTime, default=datetime.utcnow)
+    actualizado_en = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    cerrado_en = Column(DateTime)
+
+    cliente = relationship("Cliente", back_populates="incidentes")
+    vehiculo = relationship("Vehiculo", back_populates="incidentes")
+    solicitudes = relationship("Solicitud", back_populates="incidente")
+    emergencias = relationship("Emergencia", back_populates="incidente")
+    asignaciones = relationship("Asignacion", back_populates="incidente")
+    cotizaciones = relationship("Cotizacion", back_populates="incidente")
+    historial = relationship("Historial", back_populates="incidente")
+    notificaciones = relationship("Notificacion", back_populates="incidente")
+    mensajes = relationship("Mensaje", back_populates="incidente")
 
 
 class Solicitud(Base):
     __tablename__ = "solicitudes"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
-    incidente_id = Column(GUID(), nullable=True, unique=True)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True, unique=True)
     cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=False)
     vehiculo_id = Column(GUID(), ForeignKey("vehiculos.id"), nullable=False)
     estado = Column(String(50), default="pendiente")
@@ -157,6 +185,7 @@ class Solicitud(Base):
 
     cliente = relationship("Cliente", back_populates="solicitudes")
     vehiculo = relationship("Vehiculo")
+    incidente = relationship("Incidente", back_populates="solicitudes")
     emergencia = relationship("Emergencia", back_populates="solicitud", uselist=False)
     asignaciones = relationship("Asignacion", back_populates="solicitud")
     cotizaciones = relationship("Cotizacion", back_populates="solicitud")
@@ -172,6 +201,7 @@ class Emergencia(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), unique=True, nullable=False)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     tipo = Column(String(50), default="otro")
     descripcion = Column(Text)
     estado = Column(String(50), default="pendiente")
@@ -179,6 +209,7 @@ class Emergencia(Base):
     creado_en = Column(DateTime, default=datetime.utcnow)
 
     solicitud = relationship("Solicitud", back_populates="emergencia")
+    incidente = relationship("Incidente", back_populates="emergencias")
     ubicaciones = relationship("Ubicacion", back_populates="emergencia")
 
 
@@ -200,6 +231,7 @@ class Asignacion(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True)
     tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True)
     servicio = Column(String(100))
@@ -207,6 +239,7 @@ class Asignacion(Base):
     asignado_en = Column(DateTime, default=datetime.utcnow)
 
     solicitud = relationship("Solicitud", back_populates="asignaciones")
+    incidente = relationship("Incidente", back_populates="asignaciones")
     taller = relationship("Taller", back_populates="asignaciones")
     tecnico = relationship("Tecnico", back_populates="asignaciones")
 
@@ -270,6 +303,7 @@ class Cotizacion(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     pago_id = Column(GUID(), ForeignKey("pagos.id"), unique=True, nullable=True)
     monto = Column(Float, nullable=False)
     detalle = Column(Text)
@@ -277,6 +311,7 @@ class Cotizacion(Base):
     creado_en = Column(DateTime, default=datetime.utcnow)
 
     solicitud = relationship("Solicitud", back_populates="cotizaciones")
+    incidente = relationship("Incidente", back_populates="cotizaciones")
     pago = relationship("Pago", back_populates="cotizaciones")
 
 
@@ -297,12 +332,14 @@ class Historial(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     estado_anterior = Column(String(50))
     estado_nuevo = Column(String(50), nullable=False)
     comentario = Column(Text)
     creado_en = Column(DateTime, default=datetime.utcnow)
 
     solicitud = relationship("Solicitud", back_populates="historial")
+    incidente = relationship("Incidente", back_populates="historial")
 
 
 class Evidencia(Base):
@@ -335,6 +372,7 @@ class Notificacion(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=True)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     titulo = Column(String(150), nullable=False)
     mensaje = Column(Text, nullable=False)
     tipo = Column(String(60), default="sistema")
@@ -343,6 +381,7 @@ class Notificacion(Base):
 
     usuario = relationship("Usuario", back_populates="notificaciones")
     solicitud = relationship("Solicitud", back_populates="notificaciones")
+    incidente = relationship("Incidente", back_populates="notificaciones")
 
 
 class Mensaje(Base):
@@ -350,11 +389,13 @@ class Mensaje(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     contenido = Column(Text, nullable=False)
     creado_en = Column(DateTime, default=datetime.utcnow)
 
     solicitud = relationship("Solicitud", back_populates="mensajes")
+    incidente = relationship("Incidente", back_populates="mensajes")
     usuario = relationship("Usuario", back_populates="mensajes")
 
 

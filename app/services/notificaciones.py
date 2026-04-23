@@ -25,6 +25,7 @@ async def enviar_push(usuario_id: str, payload: dict[str, Any]) -> dict[str, int
             Notificacion(
                 usuario_id=usuario_id,
                 solicitud_id=payload.get("solicitud_id"),
+                incidente_id=payload.get("incidente_id"),
                 titulo=str(payload.get("titulo", "AuxilioSCZ")),
                 mensaje=str(payload.get("cuerpo", "Tienes una nueva actualización")),
                 tipo=str(payload.get("tipo", "sistema")),
