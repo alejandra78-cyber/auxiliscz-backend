@@ -1,4 +1,5 @@
 import uuid
+import os
 
 from sqlalchemy.orm import Session, joinedload
 
@@ -7,12 +8,15 @@ from app.models.models import (
     Emergencia,
     Evidencia,
     Historial,
+    Incidente,
     Mensaje,
     Notificacion,
     Solicitud,
     SolicitudEvidencia,
     Ubicacion,
 )
+
+INCIDENTES_DUAL_WRITE = os.getenv("INCIDENTES_DUAL_WRITE", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def obtener_solicitud_por_id_o_incidente(db: Session, solicitud_id_o_incidente: str) -> Solicitud | None:
@@ -67,8 +71,24 @@ def crear_solicitud_emergencia(
     descripcion: str | None,
 ) -> Solicitud:
     cliente = obtener_o_crear_cliente(db, usuario_id=usuario_id)
+    incidente = None
+    if INCIDENTES_DUAL_WRITE:
+        incidente = Incidente(
+            id=uuid.uuid4(),
+            cliente_id=cliente.id,
+            vehiculo_id=vehiculo_id,
+            estado="pendiente",
+            prioridad=2,
+            tipo=tipo,
+            descripcion=descripcion,
+            canal_origen="api",
+        )
+        db.add(incidente)
+        db.flush()
+
     solicitud = Solicitud(
         id=uuid.uuid4(),
+        incidente_id=incidente.id if incidente else None,
         cliente_id=cliente.id,
         vehiculo_id=vehiculo_id,
         estado="pendiente",
@@ -80,6 +100,7 @@ def crear_solicitud_emergencia(
     emergencia = Emergencia(
         id=uuid.uuid4(),
         solicitud_id=solicitud.id,
+        incidente_id=incidente.id if incidente else None,
         tipo=tipo,
         descripcion=descripcion,
         estado="pendiente",
@@ -101,6 +122,7 @@ def crear_solicitud_emergencia(
         Historial(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=incidente.id if incidente else None,
             estado_anterior=None,
             estado_nuevo="pendiente",
             comentario="Solicitud creada",
@@ -114,6 +136,7 @@ def actualizar_ubicacion_solicitud(db: Session, *, solicitud: Solicitud, lat: fl
         solicitud.emergencia = Emergencia(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             tipo="otro",
             descripcion=None,
             estado=solicitud.estado,
@@ -173,6 +196,7 @@ def registrar_cambio_estado(
         Historial(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             estado_anterior=estado_anterior,
             estado_nuevo=estado_nuevo,
             comentario=comentario,
@@ -197,6 +221,7 @@ def crear_mensaje(
     texto: str,
 ) -> Mensaje:
     msg = Mensaje(id=uuid.uuid4(), solicitud_id=solicitud.id, usuario_id=usuario_id, contenido=texto)
+    msg.incidente_id = solicitud.incidente_id
     db.add(msg)
     db.flush()
     return msg
@@ -207,6 +232,7 @@ def crear_notificacion(
     *,
     usuario_id,
     solicitud_id,
+    incidente_id=None,
     titulo: str,
     mensaje: str,
     tipo: str = "sistema",
@@ -216,6 +242,7 @@ def crear_notificacion(
             id=uuid.uuid4(),
             usuario_id=usuario_id,
             solicitud_id=solicitud_id,
+            incidente_id=incidente_id,
             titulo=titulo,
             mensaje=mensaje,
             tipo=tipo,

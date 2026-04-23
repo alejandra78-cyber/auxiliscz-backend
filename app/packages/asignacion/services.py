@@ -119,12 +119,15 @@ def _guardar_historial(db: Session, solicitud: Solicitud, anterior: str | None, 
         Historial(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             estado_anterior=anterior,
             estado_nuevo=nuevo,
             comentario=comentario,
         )
     )
     solicitud.estado = nuevo
+    if solicitud.incidente:
+        solicitud.incidente.estado = nuevo
     if solicitud.emergencia:
         solicitud.emergencia.estado = nuevo
 
@@ -143,6 +146,7 @@ def _crear_notificacion_evento(
             id=uuid.uuid4(),
             usuario_id=usuario_id,
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             titulo=titulo,
             mensaje=mensaje,
             tipo=tipo,
@@ -336,6 +340,7 @@ async def asignar_taller_automaticamente(
         Asignacion(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             taller_id=taller.id,
             tecnico_id=None,
             estado="asignada",
@@ -376,6 +381,7 @@ async def reasignar_taller(
         Asignacion(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             taller_id=candidato["taller_id"],
             tecnico_id=None,
             estado="asignada",
@@ -495,6 +501,7 @@ def asignar_servicio(
         Asignacion(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             taller_id=taller_asig,
             tecnico_id=tecnico_id,
             servicio=servicio_key,

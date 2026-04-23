@@ -140,6 +140,7 @@ async def reportar_emergencia(
         db,
         usuario_id=current_user.id,
         solicitud_id=solicitud.id,
+        incidente_id=solicitud.incidente_id,
         titulo="Emergencia reportada",
         mensaje=f"Tu solicitud fue registrada y está en estado {solicitud.estado}",
         tipo="emergencia",
@@ -196,6 +197,10 @@ async def _procesar_asignacion_automatica(
         if solicitud.emergencia:
             solicitud.emergencia.tipo = tipo
             solicitud.emergencia.prioridad = prioridad
+        if solicitud.incidente:
+            solicitud.incidente.tipo = tipo
+            solicitud.incidente.prioridad = prioridad
+            solicitud.incidente.descripcion = solicitud.emergencia.descripcion if solicitud.emergencia else solicitud.incidente.descripcion
         solicitud.prioridad = prioridad
         agregar_evidencia_solicitud(
             db,
@@ -364,6 +369,7 @@ async def enviar_mensaje_solicitud(
             db,
             usuario_id=destinatario_id,
             solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
             titulo="Nuevo mensaje",
             mensaje=texto_limpio[:250],
             tipo="chat",
