@@ -1,11 +1,12 @@
 import hashlib
 import secrets
 from datetime import timedelta
+from urllib.parse import urlencode
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.security import get_password_hash, verify_password
+from app.core.security import create_access_token, get_password_hash, verify_password
 from app.core.time import local_now_naive
 from app.models.models import PasswordResetToken, Usuario
 from app.services.emailer import enviar_email
@@ -119,7 +120,8 @@ def solicitar_recuperacion_password(db: Session, *, email: str) -> RecuperarPass
         frontend_url = "http://localhost:4200"
         import os
         frontend_url = os.getenv("FRONTEND_BASE_URL", frontend_url).rstrip("/")
-        reset_url = f"{frontend_url}/recover-password?reset_token={raw_token}"
+        query = urlencode({"reset_token": raw_token})
+        reset_url = f"{frontend_url}/recover-password?{query}"
         enviar_email(
             usuario.email,
             "AuxilioSCZ - Recuperación de contraseña",

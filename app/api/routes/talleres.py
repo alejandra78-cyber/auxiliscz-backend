@@ -2,6 +2,7 @@ import json
 import os
 import secrets
 import uuid
+from urllib.parse import urlencode
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -493,7 +494,8 @@ def aprobar_solicitud_afiliacion_admin(
         commit=False,
     )
     frontend_url = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").rstrip("/")
-    activation_url = f"{frontend_url}/recover-password?reset_token={token_activacion}&mode=activation"
+    query = urlencode({"reset_token": token_activacion, "mode": "activation"})
+    activation_url = f"{frontend_url}/recover-password?{query}"
     mail_ok = enviar_email(
         usuario.email,
         "AuxilioSCZ - Taller aprobado, activa tu cuenta",
