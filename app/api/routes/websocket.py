@@ -7,10 +7,10 @@ WebSocket para:
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
 from app.core.database import get_db
+from app.core.time import local_now
 from app.models.models import Asignacion, Solicitud, Tecnico
 from typing import Dict, List
 import json, asyncio
-from datetime import datetime
 
 router = APIRouter()
 
@@ -69,7 +69,7 @@ async def chat_endpoint(websocket: WebSocket, incidente_id: str):
         while True:
             data = await websocket.receive_text()
             mensaje = json.loads(data)
-            mensaje["timestamp"] = datetime.utcnow().isoformat()
+            mensaje["timestamp"] = local_now().isoformat()
             await manager.broadcast_chat(incidente_id, mensaje)
     except WebSocketDisconnect:
         manager.disconnect_chat(websocket, incidente_id)
@@ -118,7 +118,7 @@ async def tracking_endpoint(websocket: WebSocket, incidente_id: str, db: Session
                     "lat": payload["lat"],
                     "lng": payload["lng"],
                     "eta_minutos": eta,
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": local_now().isoformat()
                 })
     except WebSocketDisconnect:
         manager.disconnect_tracking(websocket, incidente_id)

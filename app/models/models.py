@@ -1,10 +1,10 @@
 import uuid
-from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base, GUID
+from app.core.time import local_now_naive
 
 
 class Usuario(Base):
@@ -16,7 +16,7 @@ class Usuario(Base):
     password_hash = Column(String(255), nullable=False)
     telefono = Column(String(20))
     estado = Column(String(30), default="activo")
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     vehiculos = relationship("Vehiculo", back_populates="usuario")
     taller = relationship("Taller", back_populates="usuario", uselist=False)
@@ -61,7 +61,7 @@ class UsuarioRol(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     rol_id = Column(GUID(), ForeignKey("roles.id"), nullable=False)
-    asignado_en = Column(DateTime, default=datetime.utcnow)
+    asignado_en = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="usuario_roles")
     rol = relationship("Rol", back_populates="usuarios")
@@ -73,7 +73,7 @@ class RolPermiso(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     rol_id = Column(GUID(), ForeignKey("roles.id"), nullable=False)
     permiso_id = Column(GUID(), ForeignKey("permisos.id"), nullable=False)
-    asignado_en = Column(DateTime, default=datetime.utcnow)
+    asignado_en = Column(DateTime, default=local_now_naive)
 
     rol = relationship("Rol", back_populates="permisos")
     permiso = relationship("Permiso", back_populates="roles")
@@ -85,7 +85,7 @@ class Cliente(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), unique=True, nullable=False)
     direccion = Column(String(255))
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="cliente")
     solicitudes = relationship("Solicitud", back_populates="cliente")
@@ -156,8 +156,8 @@ class Incidente(Base):
     tipo = Column(String(50), default="incierto", nullable=False)
     descripcion = Column(Text)
     canal_origen = Column(String(20), default="api", nullable=False)
-    creado_en = Column(DateTime, default=datetime.utcnow)
-    actualizado_en = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
     cerrado_en = Column(DateTime)
 
     cliente = relationship("Cliente", back_populates="incidentes")
@@ -180,8 +180,8 @@ class Solicitud(Base):
     vehiculo_id = Column(GUID(), ForeignKey("vehiculos.id"), nullable=False)
     estado = Column(String(50), default="pendiente")
     prioridad = Column(Integer, default=2)
-    creado_en = Column(DateTime, default=datetime.utcnow)
-    actualizado_en = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
 
     cliente = relationship("Cliente", back_populates="solicitudes")
     vehiculo = relationship("Vehiculo")
@@ -206,7 +206,7 @@ class Emergencia(Base):
     descripcion = Column(Text)
     estado = Column(String(50), default="pendiente")
     prioridad = Column(Integer, default=2)
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="emergencia")
     incidente = relationship("Incidente", back_populates="emergencias")
@@ -221,7 +221,7 @@ class Ubicacion(Base):
     latitud = Column(Float, nullable=False)
     longitud = Column(Float, nullable=False)
     fuente = Column(String(40), default="gps")
-    registrado_en = Column(DateTime, default=datetime.utcnow)
+    registrado_en = Column(DateTime, default=local_now_naive)
 
     emergencia = relationship("Emergencia", back_populates="ubicaciones")
 
@@ -236,7 +236,7 @@ class Asignacion(Base):
     tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True)
     servicio = Column(String(100))
     estado = Column(String(50), default="asignada")
-    asignado_en = Column(DateTime, default=datetime.utcnow)
+    asignado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="asignaciones")
     incidente = relationship("Incidente", back_populates="asignaciones")
@@ -251,7 +251,7 @@ class Disponibilidad(Base):
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=False)
     tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True)
     estado = Column(String(40), default="disponible")
-    desde = Column(DateTime, default=datetime.utcnow)
+    desde = Column(DateTime, default=local_now_naive)
     hasta = Column(DateTime)
 
     taller = relationship("Taller", back_populates="disponibilidades")
@@ -266,7 +266,7 @@ class Turno(Base):
     nombre = Column(String(120), nullable=False)
     especialidad = Column(String(120))
     disponible = Column(Boolean, default=True)
-    inicio = Column(DateTime, default=datetime.utcnow)
+    inicio = Column(DateTime, default=local_now_naive)
     fin = Column(DateTime)
 
     tecnico = relationship("Tecnico", back_populates="turnos")
@@ -279,7 +279,7 @@ class Evaluacion(Base):
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     estrellas = Column(Integer, nullable=False)
     comentario = Column(Text)
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="evaluaciones")
 
@@ -308,7 +308,7 @@ class Cotizacion(Base):
     monto = Column(Float, nullable=False)
     detalle = Column(Text)
     estado = Column(String(50), default="pendiente")
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="cotizaciones")
     incidente = relationship("Incidente", back_populates="cotizaciones")
@@ -322,7 +322,7 @@ class Comision(Base):
     pago_id = Column(GUID(), ForeignKey("pagos.id"), unique=True, nullable=False)
     porcentaje = Column(Float, nullable=False, default=10.0)
     monto = Column(Float, nullable=True)
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     pago = relationship("Pago", back_populates="comision_detalle")
 
@@ -336,7 +336,7 @@ class Historial(Base):
     estado_anterior = Column(String(50))
     estado_nuevo = Column(String(50), nullable=False)
     comentario = Column(Text)
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="historial")
     incidente = relationship("Incidente", back_populates="historial")
@@ -349,7 +349,7 @@ class Evidencia(Base):
     tipo = Column(String(20), nullable=False)
     url_archivo = Column(String(500))
     transcripcion = Column(Text)
-    subido_en = Column(DateTime, default=datetime.utcnow)
+    subido_en = Column(DateTime, default=local_now_naive)
 
     solicitudes = relationship("SolicitudEvidencia", back_populates="evidencia")
 
@@ -360,7 +360,7 @@ class SolicitudEvidencia(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     evidencia_id = Column(GUID(), ForeignKey("evidencias.id"), nullable=False)
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="evidencias")
     evidencia = relationship("Evidencia", back_populates="solicitudes")
@@ -377,7 +377,7 @@ class Notificacion(Base):
     mensaje = Column(Text, nullable=False)
     tipo = Column(String(60), default="sistema")
     estado = Column(String(40), default="no_leida")
-    creada_en = Column(DateTime, default=datetime.utcnow)
+    creada_en = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="notificaciones")
     solicitud = relationship("Solicitud", back_populates="notificaciones")
@@ -392,7 +392,7 @@ class Mensaje(Base):
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     contenido = Column(Text, nullable=False)
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="mensajes")
     incidente = relationship("Incidente", back_populates="mensajes")
@@ -407,7 +407,7 @@ class Metrica(Base):
     codigo = Column(String(80), nullable=False)
     valor = Column(Float, nullable=False, default=0)
     periodo = Column(String(50))
-    creado_en = Column(DateTime, default=datetime.utcnow)
+    creado_en = Column(DateTime, default=local_now_naive)
 
     taller = relationship("Taller", back_populates="metricas")
 
@@ -420,6 +420,6 @@ class Auditoria(Base):
     accion = Column(String(120), nullable=False)
     modulo = Column(String(80), nullable=False)
     detalle = Column(Text)
-    fecha = Column(DateTime, default=datetime.utcnow)
+    fecha = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="auditorias")
