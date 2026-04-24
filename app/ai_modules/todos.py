@@ -2,9 +2,12 @@
 ai_modules/clasificador.py
 Clasificación multimodal de incidentes vehiculares.
 """
-import openai
-import json
+
+import os
 from typing import List, Dict
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 CATEGORIAS = ["bateria", "llanta", "motor", "choque", "llave", "otro", "incierto"]
 
@@ -44,7 +47,7 @@ Responde ÚNICAMENTE en JSON con este formato:
 Si la información es insuficiente o contradictoria, usa tipo "incierto".
 """
 
-    response = await openai.AsyncOpenAI().chat.completions.create(
+    response = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
@@ -99,7 +102,7 @@ async def transcribir_audio(contenido: bytes, idioma: str = "es") -> str:
 
     try:
         with open(tmp_path, "rb") as audio_file:
-            transcripcion = await openai.AsyncOpenAI().audio.transcriptions.create(
+            transcripcion = await client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
                 language=idioma

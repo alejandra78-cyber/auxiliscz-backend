@@ -1,5 +1,9 @@
 # Entorno virtual
 venv/
+.venv/
+
+# Variables de entorno
+.env
 .env/
 .env.*
 !.env.example
@@ -12,7 +16,8 @@ __pycache__/
 # Logs
 *.log
 
-# Base de datos (si usas SQLite)
+# Base de datos
+*.db
 db.sqlite3
 
 # Archivos de sistema
@@ -23,9 +28,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Node (por error si aparece)
+# Node
 node_modules/
 
-# Firebase (credenciales sensibles)
+# Firebase
 firebase-credentials.json
 *firebase*credentials*.json

@@ -88,6 +88,7 @@ def consultar_estado_solicitud_endpoint(
         resumen_ia=resumen_ia,
         taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
         taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
+        tiempo_estimado_min=getattr(ultimo, "tiempo_estimado_min", None) or 15,
     )
 
 

@@ -5,17 +5,16 @@ from app.core.security import get_current_user
 
 router = APIRouter()
 
-@router.post("/procesar")
-def procesar_pago(
+@router.post("/evaluar")
+def evaluar_servicio(
     solicitud_id: str,
-    metodo: str,
+    estrellas: int,
+    comentario: str = "",
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     return {
-        "pago_id": "PAGO123",
-        "estado": "completado",
-        "metodo": metodo,
+        "mensaje": "Evaluación registrada",
         "solicitud_id": solicitud_id,
-        "monto": 100
+        "estrellas": estrellas
     }

@@ -98,15 +98,21 @@ async def reportar_emergencia(
 
     if audio:
         contenido_audio = await audio.read()
-        transcripcion = await transcribir_audio_a_texto(contenido_audio)
+
+        try:
+            transcripcion = await transcribir_audio_a_texto(contenido_audio)
+        except Exception as e:
+            print("ERROR IA AUDIO:", e)
+            transcripcion = "No se pudo procesar el audio (IA sin cuota)"
+
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
             tipo="audio",
             transcripcion=transcripcion,
         )
-        evidencias_datos.append({"tipo": "audio", "texto": transcripcion})
 
+        evidencias_datos.append({"tipo": "audio", "texto": transcripcion})
     if foto:
         contenido_foto = await foto.read()
         try:

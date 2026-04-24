@@ -1,20 +1,27 @@
 import os
 import uuid
-from sqlalchemy import create_engine, CHAR, TypeDecorator
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
 from dotenv import load_dotenv
+from sqlalchemy import CHAR, TypeDecorator, create_engine
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./auxilio_scz.db")
+DATABASE_URL = "sqlite:///./auxilio_scz.db"
 
 connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
     connect_args = {"check_same_thread": False}
 
 engine = create_engine(DATABASE_URL, connect_args=connect_args)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine,
+)
+
 Base = declarative_base()
 
 
@@ -34,10 +41,12 @@ class GUID(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return value
+
         if dialect.name == "postgresql":
             if isinstance(value, uuid.UUID):
                 return value
             return str(value)
+
         if not isinstance(value, uuid.UUID):
             value = uuid.UUID(str(value))
         return str(value)
