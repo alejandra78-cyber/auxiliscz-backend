@@ -188,6 +188,20 @@ def _ensure_incremental_schema() -> None:
                 conn.execute(text("ALTER TABLE asignaciones ADD COLUMN puntaje DOUBLE PRECISION"))
             if "motivo_asignacion" not in cols_asig:
                 conn.execute(text("ALTER TABLE asignaciones ADD COLUMN motivo_asignacion TEXT"))
+            if "fecha_respuesta_taller" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_respuesta_taller TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_respuesta_taller DATETIME")
+                )
+            if "fecha_asignacion" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_asignacion TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_asignacion DATETIME")
+                )
+            if "motivo_rechazo" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN motivo_rechazo TEXT"))
 
         if "tecnicos" in tables:
             cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}

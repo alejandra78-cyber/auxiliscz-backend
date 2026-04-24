@@ -1,13 +1,16 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 import json
 import math
+import asyncio
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.models.models import (
     Asignacion,
+    Auditoria,
+    Cliente,
     Emergencia,
     Historial,
     Metrica,
@@ -72,8 +75,9 @@ def _resolver_solicitud(db: Session, solicitud_id_o_incidente: str) -> Solicitud
             joinedload(Solicitud.emergencia).joinedload(Emergencia.ubicaciones),
             joinedload(Solicitud.asignaciones).joinedload(Asignacion.taller),
             joinedload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
-            joinedload(Solicitud.cliente),
+            joinedload(Solicitud.cliente).joinedload(Cliente.usuario),
             joinedload(Solicitud.evidencias).joinedload(SolicitudEvidencia.evidencia),
+            joinedload(Solicitud.incidente),
         )
         .filter(Solicitud.id == raw_id)
         .first()
@@ -87,8 +91,9 @@ def _resolver_solicitud(db: Session, solicitud_id_o_incidente: str) -> Solicitud
             joinedload(Solicitud.emergencia).joinedload(Emergencia.ubicaciones),
             joinedload(Solicitud.asignaciones).joinedload(Asignacion.taller),
             joinedload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
-            joinedload(Solicitud.cliente),
+            joinedload(Solicitud.cliente).joinedload(Cliente.usuario),
             joinedload(Solicitud.evidencias).joinedload(SolicitudEvidencia.evidencia),
+            joinedload(Solicitud.incidente),
         )
         .filter(Solicitud.incidente_id == raw_id)
         .first()
@@ -101,8 +106,50 @@ def _get_ultimo_asignacion(solicitud: Solicitud) -> Asignacion | None:
     return sorted(solicitud.asignaciones, key=lambda x: x.asignado_en or x.id)[-1]
 
 
+def _get_ultima_asignacion_taller(solicitud: Solicitud, taller_id: str) -> Asignacion | None:
+    candidatas = [a for a in (solicitud.asignaciones or []) if a.taller_id and str(a.taller_id) == str(taller_id)]
+    if not candidatas:
+        return None
+    return sorted(candidatas, key=lambda x: (x.fecha_asignacion or x.asignado_en or datetime.min), reverse=True)[0]
+
+
+def _get_ubicacion_incidente(solicitud: Solicitud) -> tuple[float | None, float | None]:
+    if solicitud.emergencia and solicitud.emergencia.ubicaciones:
+        last = sorted(solicitud.emergencia.ubicaciones, key=lambda u: u.registrado_en or datetime.min)[-1]
+        return last.latitud, last.longitud
+    return None, None
+
+
+def _parse_fecha_iso(fecha: str | None, *, end_of_day: bool = False) -> datetime | None:
+    if not fecha:
+        return None
+    raw = fecha.strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) == 10:
+            base = datetime.strptime(raw, "%Y-%m-%d")
+            if end_of_day:
+                return datetime.combine(base.date(), time.max)
+            return datetime.combine(base.date(), time.min)
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Fecha inválida: {fecha}")
+
+
 def _estado_valido(estado: str) -> str:
-    estados = {"pendiente", "aprobada", "rechazada", "asignada", "en_proceso", "completada", "cancelada", "en_evaluacion"}
+    estados = {
+        "pendiente",
+        "aprobada",
+        "aceptado",
+        "rechazada",
+        "asignada",
+        "en_proceso",
+        "completada",
+        "cancelada",
+        "en_evaluacion",
+        "sin_taller_disponible",
+    }
     s = (estado or "").strip().lower()
     if s not in estados:
         raise HTTPException(status_code=400, detail="Estado no válido")
@@ -351,10 +398,11 @@ async def asignar_taller_automaticamente(
             incidente_id=solicitud.incidente_id,
             taller_id=taller.id,
             tecnico_id=None,
+            fecha_asignacion=local_now_naive(),
             distancia_km=float(candidato.get("distancia_km", 0) or 0),
             puntaje=float(candidato.get("puntaje", 0) or 0),
             motivo_asignacion=str(candidato.get("motivo") or "Asignación automática por motor"),
-            estado="asignada",
+            estado="pendiente_respuesta",
         )
     )
     _guardar_historial(
@@ -395,10 +443,11 @@ async def reasignar_taller(
             incidente_id=solicitud.incidente_id,
             taller_id=candidato["taller_id"],
             tecnico_id=None,
+            fecha_asignacion=local_now_naive(),
             distancia_km=float(candidato.get("distancia_km", 0) or 0),
             puntaje=float(candidato.get("puntaje", 0) or 0),
             motivo_asignacion=str(candidato.get("motivo") or "Reasignación automática por motor"),
-            estado="asignada",
+            estado="pendiente_respuesta",
         )
     )
     _guardar_historial(
@@ -412,23 +461,75 @@ async def reasignar_taller(
     return candidato
 
 
-def listar_solicitudes_servicio(db: Session, *, current_user: Usuario) -> list[Solicitud]:
+def listar_solicitudes_servicio(
+    db: Session,
+    *,
+    current_user: Usuario,
+    estado: str | None = None,
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    taller_id: str | None = None,
+) -> list[Solicitud]:
     if current_user.rol not in {"taller", "admin"}:
         raise HTTPException(status_code=403, detail="Solo taller/admin puede consultar solicitudes")
+    fecha_desde_dt = _parse_fecha_iso(fecha_desde, end_of_day=False)
+    fecha_hasta_dt = _parse_fecha_iso(fecha_hasta, end_of_day=True)
+    if fecha_desde_dt and fecha_hasta_dt and fecha_desde_dt > fecha_hasta_dt:
+        raise HTTPException(status_code=400, detail="fecha_desde no puede ser mayor a fecha_hasta")
+    estado_norm = (estado or "").strip().lower() or None
+    if estado_norm and estado_norm not in {"pendiente", "en_evaluacion", "aprobada", "rechazada", "asignada", "en_proceso", "completada", "cancelada"}:
+        raise HTTPException(status_code=400, detail="Filtro de estado inválido")
+
     q = db.query(Solicitud).options(
         joinedload(Solicitud.emergencia),
         joinedload(Solicitud.emergencia).joinedload(Emergencia.ubicaciones),
-        joinedload(Solicitud.cliente),
+        joinedload(Solicitud.cliente).joinedload(Cliente.usuario),
         joinedload(Solicitud.asignaciones).joinedload(Asignacion.taller),
         joinedload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
         joinedload(Solicitud.evidencias).joinedload(SolicitudEvidencia.evidencia),
+        joinedload(Solicitud.incidente),
     )
     if current_user.rol == "taller":
         mi_taller = _obtener_taller_de_usuario(db, current_user)
         if not mi_taller:
             raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
-        q = q.outerjoin(Asignacion).filter((Asignacion.taller_id.is_(None)) | (Asignacion.taller_id == mi_taller.id))
-    return q.order_by(Solicitud.creado_en.desc()).all()
+        q = q.join(Asignacion, Asignacion.solicitud_id == Solicitud.id).filter(Asignacion.taller_id == mi_taller.id)
+    elif current_user.rol == "admin" and taller_id:
+        q = q.join(Asignacion, Asignacion.solicitud_id == Solicitud.id).filter(Asignacion.taller_id == taller_id)
+    if estado_norm:
+        q = q.filter(Solicitud.estado == estado_norm)
+    if fecha_desde_dt:
+        q = q.filter(Solicitud.creado_en >= fecha_desde_dt)
+    if fecha_hasta_dt:
+        q = q.filter(Solicitud.creado_en <= fecha_hasta_dt)
+    rows = q.order_by(Solicitud.creado_en.desc()).all()
+    dedup: dict[str, Solicitud] = {}
+    for row in rows:
+        key = str(row.id)
+        if key not in dedup:
+            dedup[key] = row
+    return list(dedup.values())
+
+
+def obtener_detalle_solicitud_servicio(
+    db: Session,
+    *,
+    incidente_id: str,
+    current_user: Usuario,
+) -> Solicitud:
+    if current_user.rol not in {"taller", "admin"}:
+        raise HTTPException(status_code=403, detail="Solo taller/admin puede consultar detalle de solicitudes")
+    solicitud = _resolver_solicitud(db, incidente_id)
+    if not solicitud:
+        raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    if current_user.rol == "taller":
+        mi_taller = _obtener_taller_de_usuario(db, current_user)
+        if not mi_taller:
+            raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
+        asignacion_taller = next((a for a in solicitud.asignaciones if str(a.taller_id) == str(mi_taller.id)), None)
+        if not asignacion_taller:
+            raise HTTPException(status_code=403, detail="No autorizado para consultar esta solicitud")
+    return solicitud
 
 
 def evaluar_solicitud_servicio(
@@ -439,35 +540,174 @@ def evaluar_solicitud_servicio(
     aprobar: bool,
     observacion: str | None,
 ) -> Solicitud:
-    if current_user.rol not in {"taller", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo taller/admin puede evaluar solicitudes")
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo taller puede evaluar solicitudes")
     solicitud = _resolver_solicitud(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     if solicitud.estado in {"completada", "cancelada", "rechazada"}:
         raise HTTPException(status_code=400, detail="La solicitud ya fue cerrada")
 
+    # Flujo CU15 para actor Taller: evaluar SOLO solicitudes asignadas a su taller.
+    mi_taller = _obtener_taller_de_usuario(db, current_user)
+    if not mi_taller:
+        raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
+
+    asig_actual = _get_ultima_asignacion_taller(solicitud, str(mi_taller.id))
+    if not asig_actual:
+        raise HTTPException(status_code=403, detail="No autorizado: la solicitud no pertenece a este taller")
+
+    if (asig_actual.estado or "").lower() not in {"pendiente_respuesta", "asignada"}:
+        raise HTTPException(status_code=400, detail="La asignación no está pendiente de evaluación")
+
     estado_anterior = solicitud.estado
+    asig_actual.fecha_respuesta_taller = local_now_naive()
+
     if aprobar:
-        if solicitud.estado not in {"pendiente", "en_evaluacion"}:
-            raise HTTPException(status_code=400, detail="Solo se puede evaluar una solicitud pendiente")
-        nuevo = "aprobada"
+            # Validaciones operativas de CU07
+            estado_operativo = (mi_taller.estado_operativo or "disponible").lower()
+            if estado_operativo in {"cerrado", "fuera_de_servicio"} or not mi_taller.disponible:
+                raise HTTPException(status_code=400, detail="El taller no está disponible para aceptar solicitudes")
+
+            capacidad_max = int(getattr(mi_taller, "capacidad_maxima", 1) or 1)
+            carga_activa = (
+                db.query(Asignacion)
+                .filter(
+                    Asignacion.taller_id == mi_taller.id,
+                    Asignacion.estado.in_(["aceptada", "asignada", "en_proceso"]),
+                )
+                .count()
+            )
+            if carga_activa >= capacidad_max:
+                raise HTTPException(status_code=400, detail="El taller no tiene capacidad disponible")
+
+            asig_actual.estado = "aceptada"
+            asig_actual.motivo_rechazo = None
+            nuevo = "aceptado"
+            _guardar_historial(
+                db,
+                solicitud,
+                estado_anterior,
+                nuevo,
+                observacion or f"Solicitud aceptada por taller {mi_taller.nombre}",
+            )
+            db.add(
+                Auditoria(
+                    id=uuid.uuid4(),
+                    usuario_id=current_user.id,
+                    accion="cu15_aceptar_solicitud",
+                    modulo="asignacion",
+                    detalle=f"Solicitud {solicitud.id} aceptada por taller {mi_taller.id}",
+                )
+            )
+            if solicitud.cliente:
+                _crear_notificacion_evento(
+                    db,
+                    solicitud=solicitud,
+                    usuario_id=solicitud.cliente.usuario_id,
+                    titulo="Solicitud aceptada",
+                    mensaje=f"Tu solicitud {codigo_solicitud(solicitud)} fue aceptada por el taller",
+                    tipo="evaluacion_aceptada",
+                )
+            _incrementar_metrica_taller(db, taller_id=mi_taller.id, codigo="cu15_aceptada")
     else:
-        nuevo = "rechazada"
-    _guardar_historial(db, solicitud, estado_anterior, nuevo, observacion)
-    if solicitud.cliente:
-        _crear_notificacion_evento(
-            db,
-            solicitud=solicitud,
-            usuario_id=solicitud.cliente.usuario_id,
-            titulo="Solicitud evaluada",
-            mensaje=f"Tu solicitud {codigo_solicitud(solicitud)} fue marcada como {nuevo}",
-            tipo="evaluacion",
-        )
-    if current_user.rol == "taller":
-        mi_taller = _obtener_taller_de_usuario(db, current_user)
-        if mi_taller:
-            _incrementar_metrica_taller(db, taller_id=mi_taller.id, codigo=f"cu15_{nuevo}")
+            # Rechazo con intento de reasignación
+            asig_actual.estado = "rechazada"
+            asig_actual.motivo_rechazo = observacion or "Rechazada por taller"
+            db.add(
+                Auditoria(
+                    id=uuid.uuid4(),
+                    usuario_id=current_user.id,
+                    accion="cu15_rechazar_solicitud",
+                    modulo="asignacion",
+                    detalle=f"Solicitud {solicitud.id} rechazada por taller {mi_taller.id}. Motivo: {asig_actual.motivo_rechazo}",
+                )
+            )
+
+            lat, lng = _get_ubicacion_incidente(solicitud)
+            tipo = (solicitud.emergencia.tipo if solicitud.emergencia else None) or "otro"
+            prioridad = int(solicitud.prioridad or 2)
+            nuevo_taller = None
+            candidato = None
+            if lat is not None and lng is not None:
+                candidatos = asyncio.run(listar_candidatos(db, lat=lat, lng=lng, tipo=tipo, prioridad=prioridad))
+                for c in candidatos:
+                    cid = str(c.get("taller_id"))
+                    if cid == str(mi_taller.id):
+                        continue
+                    ya_rechazado = any(
+                        str(a.taller_id) == cid and (a.estado or "").lower() == "rechazada"
+                        for a in (solicitud.asignaciones or [])
+                    )
+                    if ya_rechazado:
+                        continue
+                    candidato = c
+                    break
+            if candidato:
+                nuevo_taller = db.query(Taller).filter(Taller.id == candidato["taller_id"]).first()
+
+            estado_anterior = solicitud.estado
+            if nuevo_taller:
+                db.add(
+                    Asignacion(
+                        id=uuid.uuid4(),
+                        solicitud_id=solicitud.id,
+                        incidente_id=solicitud.incidente_id,
+                        taller_id=nuevo_taller.id,
+                        tecnico_id=None,
+                        fecha_asignacion=local_now_naive(),
+                        distancia_km=float(candidato.get("distancia_km", 0) or 0),
+                        puntaje=float(candidato.get("puntaje", 0) or 0),
+                        motivo_asignacion=str(candidato.get("motivo") or "Reasignación por rechazo de taller"),
+                        estado="pendiente_respuesta",
+                    )
+                )
+                nuevo = "asignada"
+                _guardar_historial(
+                    db,
+                    solicitud,
+                    estado_anterior,
+                    nuevo,
+                    f"Reasignada automáticamente al taller {nuevo_taller.nombre}",
+                )
+                if nuevo_taller.usuario_id:
+                    _crear_notificacion_evento(
+                        db,
+                        solicitud=solicitud,
+                        usuario_id=nuevo_taller.usuario_id,
+                        titulo="Nueva solicitud para evaluar",
+                        mensaje=f"Se te asignó la solicitud {codigo_solicitud(solicitud)} para evaluación",
+                        tipo="evaluacion_pendiente",
+                    )
+                if solicitud.cliente:
+                    _crear_notificacion_evento(
+                        db,
+                        solicitud=solicitud,
+                        usuario_id=solicitud.cliente.usuario_id,
+                        titulo="Solicitud reasignada",
+                        mensaje=f"Tu solicitud {codigo_solicitud(solicitud)} está siendo reasignada a otro taller",
+                        tipo="reasignacion",
+                    )
+            else:
+                nuevo = "sin_taller_disponible"
+                _guardar_historial(
+                    db,
+                    solicitud,
+                    estado_anterior,
+                    nuevo,
+                    "No hay talleres candidatos disponibles tras el rechazo",
+                )
+                if solicitud.cliente:
+                    _crear_notificacion_evento(
+                        db,
+                        solicitud=solicitud,
+                        usuario_id=solicitud.cliente.usuario_id,
+                        titulo="Sin taller disponible",
+                        mensaje=f"No se encontró taller disponible para la solicitud {codigo_solicitud(solicitud)}",
+                        tipo="sin_taller_disponible",
+                    )
+            _incrementar_metrica_taller(db, taller_id=mi_taller.id, codigo="cu15_rechazada")
+
     db.commit()
     db.refresh(solicitud)
     return solicitud
@@ -483,8 +723,8 @@ def asignar_servicio(
     taller_id: str | None,
     observacion: str | None,
 ) -> Solicitud:
-    if current_user.rol not in {"taller", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo taller/admin puede asignar servicios")
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo taller puede asignar servicios")
     solicitud = _resolver_solicitud(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
@@ -498,11 +738,10 @@ def asignar_servicio(
         raise HTTPException(status_code=400, detail="Servicio no válido para asignación")
 
     taller_asig = taller_id
-    if current_user.rol == "taller":
-        mi_taller = _obtener_taller_de_usuario(db, current_user)
-        if not mi_taller:
-            raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
-        taller_asig = str(mi_taller.id)
+    mi_taller = _obtener_taller_de_usuario(db, current_user)
+    if not mi_taller:
+        raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
+    taller_asig = str(mi_taller.id)
     tec = db.query(Tecnico).filter(Tecnico.id == tecnico_id).first()
     if not tec:
         raise HTTPException(status_code=404, detail="Técnico no encontrado")
@@ -519,6 +758,7 @@ def asignar_servicio(
             taller_id=taller_asig,
             tecnico_id=tecnico_id,
             servicio=servicio_key,
+            fecha_asignacion=local_now_naive(),
             estado="asignada",
         )
     )
@@ -555,17 +795,16 @@ def actualizar_estado_servicio(
     observacion: str | None = None,
     costo: float | None = None,
 ) -> Solicitud:
-    if current_user.rol not in {"taller", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo taller/admin puede actualizar estado")
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo taller puede actualizar estado")
     solicitud = _resolver_solicitud(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
 
-    if current_user.rol == "taller":
-        mi_taller = _obtener_taller_de_usuario(db, current_user)
-        ultima = _get_ultimo_asignacion(solicitud)
-        if not mi_taller or not ultima or str(ultima.taller_id) != str(mi_taller.id):
-            raise HTTPException(status_code=403, detail="No autorizado para actualizar esta solicitud")
+    mi_taller = _obtener_taller_de_usuario(db, current_user)
+    ultima = _get_ultimo_asignacion(solicitud)
+    if not mi_taller or not ultima or str(ultima.taller_id) != str(mi_taller.id):
+        raise HTTPException(status_code=403, detail="No autorizado para actualizar esta solicitud")
 
     estado_nuevo = _estado_valido(estado)
     if estado_nuevo not in {"asignada", "en_proceso", "completada", "cancelada"}:
@@ -575,6 +814,7 @@ def actualizar_estado_servicio(
 
     transiciones_validas = {
         "aprobada": {"asignada", "cancelada"},
+        "aceptado": {"asignada", "en_proceso", "cancelada"},
         "asignada": {"en_proceso", "cancelada"},
         "en_proceso": {"completada", "cancelada"},
     }

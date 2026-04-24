@@ -272,9 +272,12 @@ class Asignacion(Base):
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True)
     tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True)
     servicio = Column(String(100))
+    fecha_asignacion = Column(DateTime)
     distancia_km = Column(Float)
     puntaje = Column(Float)
     motivo_asignacion = Column(Text)
+    fecha_respuesta_taller = Column(DateTime)
+    motivo_rechazo = Column(Text)
     estado = Column(String(50), default="asignada")
     asignado_en = Column(DateTime, default=local_now_naive)
 

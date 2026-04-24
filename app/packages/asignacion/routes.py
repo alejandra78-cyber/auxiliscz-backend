@@ -9,8 +9,11 @@ from .schemas import (
     AsignacionOut,
     AsignarServicioIn,
     BuscarCandidatosIn,
+    EvidenciaOut,
     EvaluarSolicitudIn,
+    RechazarSolicitudIn,
     ServicioCatalogoOut,
+    SolicitudServicioDetalleOut,
     SolicitudServicioOut,
     SugerenciaAsignacionOut,
     TecnicoDisponibleOut,
@@ -26,6 +29,7 @@ from .services import (
     listar_servicios_catalogo,
     listar_solicitudes_servicio,
     listar_tecnicos_disponibles,
+    obtener_detalle_solicitud_servicio,
     reasignar_taller,
     sugerir_asignacion_inteligente,
 )
@@ -34,7 +38,14 @@ router = APIRouter()
 
 
 def _to_solicitud_out(i) -> SolicitudServicioOut:
-    ultimo = i.asignaciones[-1] if i.asignaciones else None
+    ultimo = (
+        sorted(
+            i.asignaciones,
+            key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id),
+        )[-1]
+        if i.asignaciones
+        else None
+    )
     resumen_ia = None
     if getattr(i, "evidencias", None):
         for link in reversed(i.evidencias):
@@ -42,6 +53,12 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
             if ev and ev.tipo == "resumen_ia" and ev.transcripcion:
                 resumen_ia = ev.transcripcion
                 break
+    latitud = None
+    longitud = None
+    if i.emergencia and i.emergencia.ubicaciones:
+        last = sorted(i.emergencia.ubicaciones, key=lambda u: u.registrado_en or u.id)[-1]
+        latitud = float(last.latitud) if last.latitud is not None else None
+        longitud = float(last.longitud) if last.longitud is not None else None
     return SolicitudServicioOut(
         id=str(i.id),
         codigo_solicitud=codigo_solicitud(i),
@@ -60,8 +77,36 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
         tecnico_id=str(ultimo.tecnico_id) if ultimo and ultimo.tecnico_id else None,
         tecnico_nombre=ultimo.tecnico.nombre if ultimo and ultimo.tecnico else None,
         servicio=ultimo.servicio if ultimo and ultimo.servicio else None,
+        incidente_id=str(i.incidente_id) if i.incidente_id else None,
+        latitud=latitud,
+        longitud=longitud,
+        distancia_km=(float(ultimo.distancia_km) if ultimo and ultimo.distancia_km is not None else None),
+        puntaje_asignacion=(float(ultimo.puntaje) if ultimo and ultimo.puntaje is not None else None),
+        motivo_asignacion=(str(ultimo.motivo_asignacion) if ultimo and ultimo.motivo_asignacion else None),
+        motivo_rechazo=(str(ultimo.motivo_rechazo) if ultimo and ultimo.motivo_rechazo else None),
+        fecha_asignacion=((ultimo.fecha_asignacion or ultimo.asignado_en).isoformat() if ultimo and (ultimo.fecha_asignacion or ultimo.asignado_en) else None),
+        fecha_respuesta_taller=(ultimo.fecha_respuesta_taller.isoformat() if ultimo and ultimo.fecha_respuesta_taller else None),
         creado_en=i.creado_en.isoformat() if i.creado_en else None,
     )
+
+
+def _to_solicitud_detalle_out(i) -> SolicitudServicioDetalleOut:
+    base = _to_solicitud_out(i)
+    evidencias: list[EvidenciaOut] = []
+    for link in (i.evidencias or []):
+        ev = getattr(link, "evidencia", None)
+        if not ev:
+            continue
+        evidencias.append(
+            EvidenciaOut(
+                id=str(ev.id),
+                tipo=str(ev.tipo),
+                url_archivo=ev.url_archivo,
+                transcripcion=ev.transcripcion,
+                subido_en=ev.subido_en.isoformat() if ev.subido_en else None,
+            )
+        )
+    return SolicitudServicioDetalleOut(**base.model_dump(), evidencias=evidencias)
 
 
 @router.get("/estado")
@@ -120,11 +165,32 @@ async def reasignar(incidente_id: str, payload: BuscarCandidatosIn, db: Session 
 
 @router.get("/solicitudes", response_model=list[SolicitudServicioOut])
 def solicitudes(
+    estado: str | None = None,
+    fecha_desde: str | None = None,
+    fecha_hasta: str | None = None,
+    taller_id: str | None = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    rows = listar_solicitudes_servicio(db, current_user=current_user)
+    rows = listar_solicitudes_servicio(
+        db,
+        current_user=current_user,
+        estado=estado,
+        fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta,
+        taller_id=taller_id,
+    )
     return [_to_solicitud_out(i) for i in rows]
+
+
+@router.get("/solicitudes/{incidente_id}", response_model=SolicitudServicioDetalleOut)
+def detalle_solicitud(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    row = obtener_detalle_solicitud_servicio(db, incidente_id=incidente_id, current_user=current_user)
+    return _to_solicitud_detalle_out(row)
 
 
 @router.get("/servicios/catalogo", response_model=list[ServicioCatalogoOut])
@@ -172,6 +238,39 @@ def evaluar(
         current_user=current_user,
         aprobar=payload.aprobar,
         observacion=payload.observacion,
+    )
+    return _to_solicitud_out(i)
+
+
+@router.post("/solicitudes/{incidente_id}/aceptar", response_model=SolicitudServicioOut)
+def aceptar_solicitud(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    i = evaluar_solicitud_servicio(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        aprobar=True,
+        observacion=None,
+    )
+    return _to_solicitud_out(i)
+
+
+@router.post("/solicitudes/{incidente_id}/rechazar", response_model=SolicitudServicioOut)
+def rechazar_solicitud(
+    incidente_id: str,
+    payload: RechazarSolicitudIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    i = evaluar_solicitud_servicio(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        aprobar=False,
+        observacion=payload.motivo_rechazo,
     )
     return _to_solicitud_out(i)
 

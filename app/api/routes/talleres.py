@@ -102,6 +102,11 @@ class TecnicoCandidatoOut(BaseModel):
     email: str
 
 
+class TallerAdminOptionOut(BaseModel):
+    id: UUID
+    nombre: str
+
+
 class DisponibilidadIn(BaseModel):
     disponible: bool | None = None
     estado_operativo: str | None = None
@@ -760,9 +765,25 @@ def crear_taller(
 
 
 @router.get("/", response_model=list[TallerOut])
-def listar_talleres(db: Session = Depends(get_db)):
+def listar_talleres(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol not in {"admin", "taller"}:
+        raise HTTPException(status_code=403, detail="No autorizado para listar talleres")
     talleres = db.query(Taller).options(joinedload(Taller.usuario)).all()
     return [_to_taller_out(taller) for taller in talleres]
+
+
+@router.get("/admin/talleres", response_model=list[TallerAdminOptionOut])
+def listar_talleres_admin_select(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede listar talleres")
+    rows = db.query(Taller).order_by(Taller.nombre.asc()).all()
+    return [TallerAdminOptionOut(id=t.id, nombre=t.nombre) for t in rows]
 
 
 @router.get("/admin/onboarding", response_model=list[TallerOut])
@@ -887,6 +908,20 @@ def obtener_disponibilidad_mi_taller(
     if current_user.rol != "taller":
         raise HTTPException(status_code=403, detail="Solo un taller puede consultar su disponibilidad")
     taller = _obtener_taller_de_usuario(db, current_user)
+    return _build_disponibilidad_out(db, taller)
+
+
+@router.get("/admin/talleres/{taller_id}/disponibilidad", response_model=DisponibilidadTallerOut)
+def obtener_disponibilidad_taller_admin(
+    taller_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede supervisar disponibilidad")
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+    if not taller:
+        raise HTTPException(status_code=404, detail="Taller no encontrado")
     return _build_disponibilidad_out(db, taller)
 
 
@@ -1069,6 +1104,30 @@ def listar_tecnicos_mi_taller(
     return out
 
 
+@router.get("/admin/talleres/{taller_id}/tecnicos", response_model=list[TecnicoOut])
+def listar_tecnicos_taller_admin(
+    taller_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo admin puede supervisar técnicos")
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+    if not taller:
+        raise HTTPException(status_code=404, detail="Taller no encontrado")
+    rows = db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
+    return [
+        TecnicoOut(
+            id=t.id,
+            usuario_id=t.usuario_id,
+            email=t.usuario.email if t.usuario else None,
+            nombre=t.nombre,
+            disponible=t.disponible,
+        )
+        for t in rows
+    ]
+
+
 @router.get("/mi-taller/tecnicos/candidatos", response_model=list[TecnicoCandidatoOut])
 def listar_candidatos_tecnico_mi_taller(
     db: Session = Depends(get_db),
@@ -1166,9 +1225,9 @@ def completar_servicio(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    if current_user.rol not in {"taller", "tecnico", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo taller/técnico/admin puede completar servicios")
-    taller = _obtener_taller_de_usuario(db, current_user) if current_user.rol in {"taller", "admin"} else None
+    if current_user.rol not in {"taller", "tecnico"}:
+        raise HTTPException(status_code=403, detail="Solo taller/técnico puede completar servicios")
+    taller = _obtener_taller_de_usuario(db, current_user) if current_user.rol == "taller" else None
     tecnico = _obtener_tecnico_de_usuario(db, current_user) if current_user.rol == "tecnico" else None
     if current_user.rol == "tecnico" and not tecnico:
         raise HTTPException(status_code=403, detail="No existe perfil técnico asociado a este usuario")
@@ -1176,7 +1235,7 @@ def completar_servicio(
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     q = db.query(Asignacion).filter(Asignacion.solicitud_id == solicitud.id)
-    if current_user.rol in {"taller", "admin"} and taller:
+    if current_user.rol == "taller" and taller:
         q = q.filter(Asignacion.taller_id == taller.id)
     if current_user.rol == "tecnico" and tecnico:
         q = q.filter(Asignacion.tecnico_id == tecnico.id)

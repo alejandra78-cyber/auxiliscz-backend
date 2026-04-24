@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AsignacionDemoOut(BaseModel):
@@ -36,12 +36,37 @@ class SolicitudServicioOut(BaseModel):
     tecnico_id: str | None = None
     tecnico_nombre: str | None = None
     servicio: str | None = None
+    incidente_id: str | None = None
+    latitud: float | None = None
+    longitud: float | None = None
+    distancia_km: float | None = None
+    puntaje_asignacion: float | None = None
+    motivo_asignacion: str | None = None
+    motivo_rechazo: str | None = None
+    fecha_asignacion: str | None = None
+    fecha_respuesta_taller: str | None = None
     creado_en: str | None = None
+
+
+class EvidenciaOut(BaseModel):
+    id: str
+    tipo: str
+    url_archivo: str | None = None
+    transcripcion: str | None = None
+    subido_en: str | None = None
+
+
+class SolicitudServicioDetalleOut(SolicitudServicioOut):
+    evidencias: list[EvidenciaOut] = Field(default_factory=list)
 
 
 class EvaluarSolicitudIn(BaseModel):
     aprobar: bool = True
     observacion: str | None = None
+
+
+class RechazarSolicitudIn(BaseModel):
+    motivo_rechazo: str | None = None
 
 
 class AsignarServicioIn(BaseModel):
