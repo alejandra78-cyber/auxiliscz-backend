@@ -252,6 +252,14 @@ class Incidente(Base):
     prioridad = Column(Integer, default=2, nullable=False)
     tipo = Column(String(50), default="incierto", nullable=False)
     descripcion = Column(Text)
+    latitud = Column(Float)
+    longitud = Column(Float)
+    direccion_referencia = Column(String(255))
+    resumen_ia = Column(Text)
+    confianza_ia = Column(Float)
+    transcripcion_audio = Column(Text)
+    analisis_imagen = Column(Text)
+    ia_estado = Column(String(30), default="pendiente")
     canal_origen = Column(String(20), default="api", nullable=False)
     creado_en = Column(DateTime, default=local_now_naive)
     actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
@@ -455,12 +463,16 @@ class Evidencia(Base):
     __tablename__ = "evidencias"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     tipo = Column(String(20), nullable=False)
     url_archivo = Column(String(500))
+    contenido_texto = Column(Text)
     transcripcion = Column(Text)
+    metadata_json = Column(Text)
     subido_en = Column(DateTime, default=local_now_naive)
 
     solicitudes = relationship("SolicitudEvidencia", back_populates="evidencia")
+    incidente = relationship("Incidente")
 
 
 class SolicitudEvidencia(Base):

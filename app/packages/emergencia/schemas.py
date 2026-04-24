@@ -4,17 +4,26 @@ from pydantic import BaseModel
 class ReportarEmergenciaOut(BaseModel):
     incidente_id: str
     estado: str
+    tipo: str | None = None
+    prioridad: int | None = None
+    resumen_ia: str | None = None
+    ia_estado: str | None = None
+    asignacion_id: str | None = None
     mensaje: str
 
 
 class EstadoSolicitudOut(BaseModel):
     incidente_id: str
     estado: str
+    es_cancelable: bool = False
+    fecha_actualizacion: str | None = None
     prioridad: int | None = None
     tipo: str | None = None
     resumen_ia: str | None = None
     taller_id: str | None = None
     taller_nombre: str | None = None
+    tecnico_id: str | None = None
+    tecnico_nombre: str | None = None
 
 
 class UbicacionGpsIn(BaseModel):

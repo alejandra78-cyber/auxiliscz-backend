@@ -32,6 +32,29 @@ PRIORIDAD_POR_TIPO = {
     "incierto": 2,
 }
 TIPOS_INCIDENTE_VALIDOS = set(PRIORIDAD_POR_TIPO.keys())
+ESTADOS_CANCELABLES = {
+    "pendiente",
+    "en_revision",
+    "en_evaluacion",
+    "aceptada",
+    "asignada",
+    "tecnico_asignado",
+    "pendiente_respuesta",
+}
+ESTADOS_NO_CANCELABLES = {
+    "en_camino",
+    "en_proceso",
+    "completado",
+    "completada",
+    "finalizado",
+    "cancelada",
+    "rechazada",
+}
+
+
+def _estado_key(value: str | None) -> str:
+    raw = (value or "").strip().lower()
+    return raw.replace(" ", "_")
 
 
 async def transcribir_audio_a_texto(audio_bytes: bytes, idioma: str = "es") -> str:
@@ -79,8 +102,12 @@ async def reportar_emergencia(
     lng: float,
     descripcion: str | None,
     foto: UploadFile | None,
+    fotos: list[UploadFile] | None,
     audio: UploadFile | None,
-) -> str:
+) -> dict:
+    if current_user.rol not in {"conductor", "cliente", "admin"}:
+        raise HTTPException(status_code=403, detail="Solo cliente/admin puede reportar emergencias")
+
     vehiculo = (
         db.query(Vehiculo)
         .filter(Vehiculo.id == vehiculo_id, Vehiculo.usuario_id == current_user.id, Vehiculo.activo == True)  # noqa: E712
@@ -88,6 +115,16 @@ async def reportar_emergencia(
     )
     if not vehiculo:
         raise HTTPException(status_code=400, detail="El vehículo no existe o no pertenece al cliente autenticado")
+
+    descripcion_limpia = (descripcion or "").strip()
+    fotos_recibidas = [f for f in (fotos or []) if f is not None]
+    if foto:
+        fotos_recibidas.insert(0, foto)
+    if not descripcion_limpia and not audio and not fotos_recibidas:
+        raise HTTPException(
+            status_code=400,
+            detail="Debes enviar al menos una evidencia (foto/audio) o texto descriptivo",
+        )
 
     tipo_normalizado = (tipo or "otro").strip().lower()
     if tipo_normalizado not in TIPOS_INCIDENTE_VALIDOS:
@@ -100,23 +137,36 @@ async def reportar_emergencia(
         tipo=tipo_normalizado,
         lat=lat,
         lng=lng,
-        descripcion=descripcion,
+        descripcion=descripcion_limpia or None,
     )
     evidencias_datos: list[dict] = []
+    ia_estado = "pendiente"
+    transcripcion_audio: str | None = None
+    analisis_imagenes: list[dict] = []
 
     if audio:
         contenido_audio = await audio.read()
-        transcripcion = await transcribir_audio_a_texto(contenido_audio)
+        try:
+            transcripcion = await transcribir_audio_a_texto(contenido_audio)
+        except Exception:
+            transcripcion = "No se pudo transcribir el audio"
+            ia_estado = "fallido"
+        transcripcion_audio = transcripcion
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
             tipo="audio",
             transcripcion=transcripcion,
+            contenido_texto=transcripcion,
+            metadata_json=json.dumps(
+                {"filename": audio.filename, "content_type": audio.content_type},
+                ensure_ascii=False,
+            ),
         )
         evidencias_datos.append({"tipo": "audio", "texto": transcripcion})
 
-    if foto:
-        contenido_foto = await foto.read()
+    for foto_file in fotos_recibidas:
+        contenido_foto = await foto_file.read()
         try:
             analisis_imagen = await clasificar_incidente_por_imagenes(contenido_foto)
         except Exception:
@@ -126,22 +176,56 @@ async def reportar_emergencia(
                 "nivel_danio": "desconocido",
                 "confianza": 0.0,
             }
+        analisis_imagenes.append(analisis_imagen)
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
             tipo="imagen",
             transcripcion=json.dumps(analisis_imagen, ensure_ascii=False),
+            metadata_json=json.dumps(
+                {"filename": foto_file.filename, "content_type": foto_file.content_type},
+                ensure_ascii=False,
+            ),
         )
         evidencias_datos.append({"tipo": "imagen", "datos": analisis_imagen})
 
-    if descripcion:
+    if descripcion_limpia:
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
             tipo="texto",
-            transcripcion=descripcion,
+            transcripcion=descripcion_limpia,
+            contenido_texto=descripcion_limpia,
         )
-        evidencias_datos.append({"tipo": "texto", "texto": descripcion})
+        evidencias_datos.append({"tipo": "texto", "texto": descripcion_limpia})
+
+    # IA inicial defensiva: no bloquea si falla y deja datos mínimos consistentes.
+    tipo_ia = tipo_normalizado
+    prioridad_ia = asignar_nivel_prioridad(tipo_ia)
+    confianza_ia = 0.5
+    resumen_ia = None
+    ia_estado = ia_estado or "pendiente"
+    try:
+        clasificacion_mm = await clasificar_incidente(evidencias_datos)
+        if clasificacion_mm:
+            tipo_ia = str(clasificacion_mm.get("tipo", tipo_ia))
+            if tipo_ia not in TIPOS_INCIDENTE_VALIDOS:
+                tipo_ia = "otro"
+            confianza_ia = float(clasificacion_mm.get("confianza", confianza_ia))
+        prioridad_ia = asignar_nivel_prioridad(tipo_ia)
+        try:
+            resumen_ia = await generar_ficha_resumen_incidente(
+                {"tipo": tipo_ia, "prioridad": prioridad_ia, "confianza": confianza_ia},
+                evidencias_datos,
+            )
+        except Exception:
+            resumen_ia = None
+        ia_estado = "procesado"
+    except Exception:
+        tipo_ia = "otro"
+        prioridad_ia = 2
+        confianza_ia = 0.0
+        ia_estado = "fallido"
 
     # Notificación de creación al cliente
     crear_notificacion(
@@ -154,6 +238,22 @@ async def reportar_emergencia(
         tipo="emergencia",
     )
 
+    if solicitud.emergencia:
+        solicitud.emergencia.tipo = tipo_ia
+        solicitud.emergencia.prioridad = prioridad_ia
+    solicitud.prioridad = prioridad_ia
+    if solicitud.incidente:
+        solicitud.incidente.tipo = tipo_ia
+        solicitud.incidente.prioridad = prioridad_ia
+        solicitud.incidente.descripcion = descripcion_limpia or solicitud.incidente.descripcion
+        solicitud.incidente.transcripcion_audio = transcripcion_audio
+        solicitud.incidente.analisis_imagen = (
+            json.dumps(analisis_imagenes, ensure_ascii=False) if analisis_imagenes else None
+        )
+        solicitud.incidente.resumen_ia = resumen_ia
+        solicitud.incidente.confianza_ia = confianza_ia
+        solicitud.incidente.ia_estado = ia_estado
+
     db.commit()
 
     background_tasks.add_task(
@@ -164,7 +264,15 @@ async def reportar_emergencia(
         evidencias=evidencias_datos,
         usuario_id=str(current_user.id),
     )
-    return str(solicitud.id)
+    return {
+        "incidente_id": str(solicitud.id),
+        "estado": str(solicitud.estado),
+        "tipo": tipo_ia,
+        "prioridad": prioridad_ia,
+        "resumen_ia": resumen_ia,
+        "ia_estado": ia_estado,
+        "mensaje": "Emergencia registrada correctamente",
+    }
 
 
 async def _procesar_asignacion_automatica(
@@ -209,6 +317,8 @@ async def _procesar_asignacion_automatica(
             solicitud.incidente.tipo = tipo
             solicitud.incidente.prioridad = prioridad
             solicitud.incidente.descripcion = solicitud.emergencia.descripcion if solicitud.emergencia else solicitud.incidente.descripcion
+            solicitud.incidente.ia_estado = "procesado"
+            solicitud.incidente.confianza_ia = confianza
         solicitud.prioridad = prioridad
         agregar_evidencia_solicitud(
             db,
@@ -235,7 +345,10 @@ async def _procesar_asignacion_automatica(
                 solicitud=solicitud,
                 tipo="resumen_ia",
                 transcripcion=resumen,
+                contenido_texto=resumen,
             )
+            if solicitud.incidente:
+                solicitud.incidente.resumen_ia = resumen
         except Exception:
             pass
 
@@ -261,6 +374,8 @@ async def _procesar_asignacion_automatica(
             if solicitud:
                 if solicitud.incidente:
                     solicitud.incidente.estado = "sin_taller_disponible"
+                    if not solicitud.incidente.ia_estado:
+                        solicitud.incidente.ia_estado = "fallido"
                 solicitud.estado = "sin_taller_disponible"
                 if solicitud.emergencia:
                     solicitud.emergencia.estado = "sin_taller_disponible"
@@ -280,6 +395,8 @@ async def _procesar_asignacion_automatica(
             if solicitud:
                 if solicitud.incidente:
                     solicitud.incidente.estado = "sin_taller_disponible"
+                    if not solicitud.incidente.ia_estado:
+                        solicitud.incidente.ia_estado = "fallido"
                 solicitud.estado = "sin_taller_disponible"
                 if solicitud.emergencia:
                     solicitud.emergencia.estado = "sin_taller_disponible"
@@ -304,6 +421,11 @@ def consultar_estado_solicitud(db: Session, *, incidente_id: str, current_user: 
     if not _puede_ver_solicitud(solicitud, current_user):
         raise HTTPException(status_code=403, detail="No autorizado para consultar esta solicitud")
     return solicitud
+
+
+def solicitud_es_cancelable(solicitud: Solicitud) -> bool:
+    key = _estado_key(solicitud.estado)
+    return key in ESTADOS_CANCELABLES
 
 
 def enviar_ubicacion_gps(
@@ -362,10 +484,20 @@ def cancelar_solicitud(db: Session, *, incidente_id: str, current_user: Usuario)
     solicitud = obtener_solicitud_por_id_o_incidente(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-    if not _puede_ver_solicitud(solicitud, current_user):
-        raise HTTPException(status_code=403, detail="No autorizado para cancelar esta solicitud")
-    if solicitud.estado in {"completada", "cancelada"}:
-        raise HTTPException(status_code=400, detail="La solicitud ya no puede cancelarse")
+    if current_user.rol != "admin":
+        if not solicitud.cliente or str(solicitud.cliente.usuario_id) != str(current_user.id):
+            raise HTTPException(status_code=403, detail="Solo el cliente dueño puede cancelar la solicitud")
+    estado_actual = _estado_key(solicitud.estado)
+    if estado_actual in ESTADOS_NO_CANCELABLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede cancelar una solicitud en estado '{solicitud.estado}'",
+        )
+    if estado_actual not in ESTADOS_CANCELABLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El estado actual '{solicitud.estado}' no permite cancelación",
+        )
     estado_anterior = solicitud.estado
     registrar_cambio_estado(
         db,

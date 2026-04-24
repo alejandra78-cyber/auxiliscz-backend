@@ -348,6 +348,58 @@ def _ensure_incremental_schema() -> None:
                         """
                     )
                 )
+
+        if "incidentes" in tables:
+            cols_inc = {c["name"] for c in inspector.get_columns("incidentes")}
+            if "latitud" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN latitud DOUBLE PRECISION"))
+            if "longitud" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN longitud DOUBLE PRECISION"))
+            if "direccion_referencia" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN direccion_referencia VARCHAR(255)"))
+            if "resumen_ia" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN resumen_ia TEXT"))
+            if "confianza_ia" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN confianza_ia DOUBLE PRECISION"))
+            if "transcripcion_audio" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN transcripcion_audio TEXT"))
+            if "analisis_imagen" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN analisis_imagen TEXT"))
+            if "ia_estado" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN ia_estado VARCHAR(30) DEFAULT 'pendiente'"))
+
+        if "evidencias" in tables:
+            cols_ev = {c["name"] for c in inspector.get_columns("evidencias")}
+            if "incidente_id" not in cols_ev:
+                conn.execute(
+                    text("ALTER TABLE evidencias ADD COLUMN incidente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE evidencias ADD COLUMN incidente_id CHAR(36)")
+                )
+            if "contenido_texto" not in cols_ev:
+                conn.execute(text("ALTER TABLE evidencias ADD COLUMN contenido_texto TEXT"))
+            if "metadata_json" not in cols_ev:
+                conn.execute(text("ALTER TABLE evidencias ADD COLUMN metadata_json TEXT"))
+
+            if conn.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        """
+                        DO $$
+                        BEGIN
+                          IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_constraint
+                            WHERE conname = 'fk_evidencias_incidente_id'
+                          ) THEN
+                            ALTER TABLE evidencias
+                            ADD CONSTRAINT fk_evidencias_incidente_id
+                            FOREIGN KEY (incidente_id) REFERENCES incidentes(id) NOT VALID;
+                          END IF;
+                        END$$;
+                        """
+                    )
+                )
                 conn.execute(
                     text(
                         """
