@@ -20,6 +20,7 @@ from app.models.models import (
     Auditoria,
     Cliente,
     Cotizacion,
+    Disponibilidad,
     Emergencia,
     Historial,
     Notificacion,
@@ -28,6 +29,7 @@ from app.models.models import (
     Solicitud,
     Taller,
     Tecnico,
+    Turno,
     Ubicacion,
     Usuario,
     UsuarioRol,
@@ -35,6 +37,8 @@ from app.models.models import (
 from app.services.emailer import enviar_email
 
 router = APIRouter()
+ESTADOS_OPERATIVOS_VALIDOS = {"disponible", "ocupado", "cerrado", "fuera_de_servicio"}
+ESTADOS_ASIGNACION_ACTIVA = {"asignada", "en_proceso"}
 
 
 class TallerCreate(BaseModel):
@@ -60,6 +64,10 @@ class TallerOut(BaseModel):
     longitud: float | None = None
     servicios: list[str]
     disponible: bool
+    estado_operativo: str = "disponible"
+    capacidad_maxima: int = 1
+    radio_cobertura_km: float = 10
+    observaciones_operativas: str | None = None
     calificacion: float
     estado_aprobacion: str
     aprobado_por: UUID | None = None
@@ -95,7 +103,43 @@ class TecnicoCandidatoOut(BaseModel):
 
 
 class DisponibilidadIn(BaseModel):
+    disponible: bool | None = None
+    estado_operativo: str | None = None
+    capacidad_maxima: int | None = Field(default=None, ge=1, le=500)
+    radio_cobertura_km: float | None = Field(default=None, gt=0, le=500)
+    servicios: list[str] | None = None
+    latitud: float | None = None
+    longitud: float | None = None
+    observaciones_operativas: str | None = Field(default=None, max_length=2000)
+
+
+class TurnoDisponibleOut(BaseModel):
+    tecnico_id: UUID
+    tecnico_nombre: str
+    turno_id: UUID
+    nombre: str
+    especialidad: str | None = None
     disponible: bool
+    inicio: str | None = None
+    fin: str | None = None
+
+
+class DisponibilidadTallerOut(BaseModel):
+    taller_id: UUID
+    nombre_taller: str
+    estado_operativo: str
+    disponible: bool
+    capacidad_maxima: int
+    capacidad_disponible: int
+    radio_cobertura_km: float
+    servicios: list[str]
+    tecnicos_disponibles: int
+    tecnicos_totales: int
+    direccion: str | None = None
+    latitud: float | None = None
+    longitud: float | None = None
+    observaciones_operativas: str | None = None
+    turnos_disponibles: list[TurnoDisponibleOut] = Field(default_factory=list)
 
 
 class UbicacionTecnicoIn(BaseModel):
@@ -200,6 +244,10 @@ def _to_taller_out(taller: Taller) -> TallerOut:
         longitud=parsed.longitud,
         servicios=parsed.servicios,
         disponible=parsed.disponible,
+        estado_operativo=getattr(parsed, "estado_operativo", "disponible") or "disponible",
+        capacidad_maxima=int(getattr(parsed, "capacidad_maxima", 1) or 1),
+        radio_cobertura_km=float(getattr(parsed, "radio_cobertura_km", 10) or 10),
+        observaciones_operativas=getattr(parsed, "observaciones_operativas", None),
         calificacion=parsed.calificacion,
         estado_aprobacion=getattr(parsed, "estado_aprobacion", "pendiente") or "pendiente",
         aprobado_por=getattr(parsed, "aprobado_por", None),
@@ -222,6 +270,74 @@ def _parse_servicios_raw(servicios: str | list[str] | None) -> list[str]:
     except Exception:
         pass
     return [s.strip() for s in str(servicios).split(",") if s.strip()]
+
+
+def _normalizar_servicios(servicios: list[str]) -> list[str]:
+    normalizados: list[str] = []
+    seen: set[str] = set()
+    for s in servicios:
+        v = (s or "").strip().lower().replace(" ", "_")
+        if not v:
+            continue
+        if v not in seen:
+            seen.add(v)
+            normalizados.append(v)
+    return normalizados
+
+
+def _build_disponibilidad_out(db: Session, taller: Taller) -> DisponibilidadTallerOut:
+    servicios = _parse_servicios_raw(taller.servicios)
+    tecnicos = db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
+    tecnicos_totales = len(tecnicos)
+    tecnicos_disponibles = sum(1 for t in tecnicos if t.disponible)
+    carga_activa = (
+        db.query(Asignacion)
+        .filter(Asignacion.taller_id == taller.id, Asignacion.estado.in_(list(ESTADOS_ASIGNACION_ACTIVA)))
+        .count()
+    )
+    capacidad_maxima = int(getattr(taller, "capacidad_maxima", 1) or 1)
+    capacidad_disponible = max(0, capacidad_maxima - carga_activa)
+
+    turnos_disponibles_rows = (
+        db.query(Turno, Tecnico)
+        .join(Tecnico, Tecnico.id == Turno.tecnico_id)
+        .filter(Tecnico.taller_id == taller.id, Turno.disponible.is_(True))
+        .order_by(Turno.inicio.desc())
+        .limit(20)
+        .all()
+    )
+    turnos_disponibles: list[TurnoDisponibleOut] = []
+    for turno, tecnico in turnos_disponibles_rows:
+        turnos_disponibles.append(
+            TurnoDisponibleOut(
+                tecnico_id=tecnico.id,
+                tecnico_nombre=tecnico.nombre,
+                turno_id=turno.id,
+                nombre=turno.nombre,
+                especialidad=turno.especialidad,
+                disponible=bool(turno.disponible),
+                inicio=turno.inicio.isoformat() if turno.inicio else None,
+                fin=turno.fin.isoformat() if turno.fin else None,
+            )
+        )
+
+    return DisponibilidadTallerOut(
+        taller_id=taller.id,
+        nombre_taller=taller.nombre,
+        estado_operativo=(taller.estado_operativo or "disponible"),
+        disponible=bool(taller.disponible),
+        capacidad_maxima=capacidad_maxima,
+        capacidad_disponible=capacidad_disponible,
+        radio_cobertura_km=float(getattr(taller, "radio_cobertura_km", 10) or 10),
+        servicios=servicios,
+        tecnicos_disponibles=tecnicos_disponibles,
+        tecnicos_totales=tecnicos_totales,
+        direccion=taller.direccion,
+        latitud=taller.latitud,
+        longitud=taller.longitud,
+        observaciones_operativas=taller.observaciones_operativas,
+        turnos_disponibles=turnos_disponibles,
+    )
 
 
 def _to_solicitud_afiliacion_out(row: SolicitudTaller) -> SolicitudAfiliacionOut:
@@ -439,6 +555,9 @@ def aprobar_solicitud_afiliacion_admin(
         taller.longitud = solicitud.longitud
         taller.servicios = solicitud.servicios
         taller.disponible = True
+        taller.estado_operativo = "disponible"
+        taller.capacidad_maxima = max(1, int(getattr(taller, "capacidad_maxima", 1) or 1))
+        taller.radio_cobertura_km = float(getattr(taller, "radio_cobertura_km", 10) or 10)
         taller.estado_aprobacion = "aprobado"
         taller.aprobado_por = current_user.id
         taller.aprobado_en = local_now_naive()
@@ -451,6 +570,9 @@ def aprobar_solicitud_afiliacion_admin(
             longitud=solicitud.longitud,
             servicios=solicitud.servicios,
             disponible=True,
+            estado_operativo="disponible",
+            capacidad_maxima=1,
+            radio_cobertura_km=10,
             estado_aprobacion="aprobado",
             aprobado_por=current_user.id,
             aprobado_en=local_now_naive(),
@@ -579,6 +701,9 @@ def crear_taller(
         taller.longitud = datos.longitud
         taller.servicios = json.dumps(datos.servicios)
         taller.disponible = datos.disponible
+        taller.estado_operativo = "disponible" if datos.disponible else "ocupado"
+        taller.capacidad_maxima = max(1, int(getattr(taller, "capacidad_maxima", 1) or 1))
+        taller.radio_cobertura_km = float(getattr(taller, "radio_cobertura_km", 10) or 10)
         if taller.estado_aprobacion == "rechazado":
             taller.estado_aprobacion = "pendiente"
             taller.aprobado_por = None
@@ -600,6 +725,9 @@ def crear_taller(
             longitud=datos.longitud,
             servicios=json.dumps(datos.servicios),
             disponible=datos.disponible,
+            estado_operativo="disponible" if datos.disponible else "ocupado",
+            capacidad_maxima=1,
+            radio_cobertura_km=10,
             estado_aprobacion="pendiente",
             aprobado_por=None,
             aprobado_en=None,
@@ -751,6 +879,17 @@ def mi_taller(db: Session = Depends(get_db), current_user=Depends(get_current_us
     return _to_taller_out(_obtener_taller_de_usuario(db, current_user))
 
 
+@router.get("/mi-taller/disponibilidad", response_model=DisponibilidadTallerOut)
+def obtener_disponibilidad_mi_taller(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo un taller puede consultar su disponibilidad")
+    taller = _obtener_taller_de_usuario(db, current_user)
+    return _build_disponibilidad_out(db, taller)
+
+
 @router.patch("/mi-taller/disponibilidad", response_model=TallerOut)
 def cambiar_disponibilidad(
     payload: DisponibilidadIn,
@@ -761,7 +900,99 @@ def cambiar_disponibilidad(
         raise HTTPException(status_code=403, detail="Solo un taller puede cambiar su disponibilidad")
 
     taller = _obtener_taller_de_usuario(db, current_user)
-    taller.disponible = payload.disponible
+    servicios_actuales = _parse_servicios_raw(taller.servicios)
+    nuevos_servicios = servicios_actuales
+
+    if payload.estado_operativo is not None:
+        estado = payload.estado_operativo.strip().lower()
+        if estado not in ESTADOS_OPERATIVOS_VALIDOS:
+            raise HTTPException(status_code=400, detail="estado_operativo no válido")
+        taller.estado_operativo = estado
+
+    if payload.disponible is not None:
+        taller.disponible = bool(payload.disponible)
+        if payload.estado_operativo is None:
+            taller.estado_operativo = "disponible" if taller.disponible else "ocupado"
+
+    if payload.capacidad_maxima is not None:
+        if payload.capacidad_maxima <= 0:
+            raise HTTPException(status_code=400, detail="capacidad_maxima debe ser mayor a 0")
+        taller.capacidad_maxima = int(payload.capacidad_maxima)
+
+    if payload.radio_cobertura_km is not None:
+        if payload.radio_cobertura_km <= 0:
+            raise HTTPException(status_code=400, detail="radio_cobertura_km debe ser mayor a 0")
+        taller.radio_cobertura_km = float(payload.radio_cobertura_km)
+
+    if payload.servicios is not None:
+        nuevos_servicios = _normalizar_servicios(payload.servicios)
+        if not nuevos_servicios:
+            raise HTTPException(status_code=400, detail="Debes seleccionar al menos un servicio")
+        taller.servicios = json.dumps(nuevos_servicios)
+
+    if payload.latitud is not None:
+        taller.latitud = payload.latitud
+    if payload.longitud is not None:
+        taller.longitud = payload.longitud
+
+    if payload.observaciones_operativas is not None:
+        taller.observaciones_operativas = payload.observaciones_operativas.strip() or None
+
+    if taller.estado_operativo in {"cerrado", "fuera_de_servicio"}:
+        taller.disponible = False
+
+    carga_activa = (
+        db.query(Asignacion)
+        .filter(Asignacion.taller_id == taller.id, Asignacion.estado.in_(list(ESTADOS_ASIGNACION_ACTIVA)))
+        .count()
+    )
+    if carga_activa >= int(getattr(taller, "capacidad_maxima", 1) or 1):
+        taller.estado_operativo = "ocupado"
+        taller.disponible = False
+    elif taller.estado_operativo in {"disponible", "ocupado"} and taller.disponible:
+        taller.estado_operativo = "disponible"
+
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="cu07_disponibilidad_actualizada",
+            modulo="talleres",
+            detalle=json.dumps(
+                {
+                    "taller_id": str(taller.id),
+                    "estado_operativo": taller.estado_operativo,
+                    "disponible": taller.disponible,
+                    "capacidad_maxima": taller.capacidad_maxima,
+                    "radio_cobertura_km": taller.radio_cobertura_km,
+                    "servicios": nuevos_servicios,
+                    "carga_activa": carga_activa,
+                },
+                ensure_ascii=False,
+            ),
+        )
+    )
+    db.add(
+        Disponibilidad(
+            id=uuid.uuid4(),
+            taller_id=taller.id,
+            tecnico_id=None,
+            estado=taller.estado_operativo,
+            desde=local_now_naive(),
+            hasta=None,
+        )
+    )
+    db.add(
+        Notificacion(
+            id=uuid.uuid4(),
+            usuario_id=current_user.id,
+            solicitud_id=None,
+            incidente_id=None,
+            titulo="Disponibilidad actualizada",
+            mensaje=f"Estado: {taller.estado_operativo}. Capacidad máxima: {taller.capacidad_maxima}.",
+            tipo="disponibilidad_taller",
+            estado="no_leida",
+        )
+    )
     db.add(taller)
     db.commit()
     db.refresh(taller)

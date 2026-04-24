@@ -182,6 +182,12 @@ def _ensure_incremental_schema() -> None:
                     if conn.dialect.name == "postgresql"
                     else text("ALTER TABLE asignaciones ADD COLUMN incidente_id CHAR(36)")
                 )
+            if "distancia_km" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN distancia_km DOUBLE PRECISION"))
+            if "puntaje" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN puntaje DOUBLE PRECISION"))
+            if "motivo_asignacion" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN motivo_asignacion TEXT"))
 
         if "tecnicos" in tables:
             cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}
@@ -218,6 +224,16 @@ def _ensure_incremental_schema() -> None:
                     if conn.dialect.name == "postgresql"
                     else text("ALTER TABLE talleres ADD COLUMN actualizado_en DATETIME")
                 )
+            if "estado_operativo" not in cols_taller:
+                conn.execute(
+                    text("ALTER TABLE talleres ADD COLUMN estado_operativo VARCHAR(30) NOT NULL DEFAULT 'disponible'")
+                )
+            if "capacidad_maxima" not in cols_taller:
+                conn.execute(text("ALTER TABLE talleres ADD COLUMN capacidad_maxima INTEGER NOT NULL DEFAULT 1"))
+            if "radio_cobertura_km" not in cols_taller:
+                conn.execute(text("ALTER TABLE talleres ADD COLUMN radio_cobertura_km DOUBLE PRECISION NOT NULL DEFAULT 10"))
+            if "observaciones_operativas" not in cols_taller:
+                conn.execute(text("ALTER TABLE talleres ADD COLUMN observaciones_operativas TEXT"))
 
         fk_targets = [
             ("solicitudes", "incidente_id"),

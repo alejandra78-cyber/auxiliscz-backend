@@ -19,7 +19,7 @@ from app.models.models import (
     Turno,
     Usuario,
 )
-from app.services.asignacion import listar_candidatos, motor_asignacion
+from app.services.asignacion import listar_candidatos
 from app.core.time import local_now_naive
 
 from .schemas import AsignacionDemoOut
@@ -334,7 +334,14 @@ async def asignar_taller_automaticamente(
     solicitud = _resolver_solicitud(db, solicitud_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-    taller = await motor_asignacion(db, lat=lat, lng=lng, tipo=tipo, prioridad=prioridad)
+    candidatos = await listar_candidatos(db, lat=lat, lng=lng, tipo=tipo, prioridad=prioridad)
+    if not candidatos:
+        return None
+    candidato = candidatos[0]
+    taller_id = candidato.get("taller_id")
+    if not taller_id:
+        return None
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
     if not taller:
         return None
     db.add(
@@ -344,6 +351,9 @@ async def asignar_taller_automaticamente(
             incidente_id=solicitud.incidente_id,
             taller_id=taller.id,
             tecnico_id=None,
+            distancia_km=float(candidato.get("distancia_km", 0) or 0),
+            puntaje=float(candidato.get("puntaje", 0) or 0),
+            motivo_asignacion=str(candidato.get("motivo") or "Asignación automática por motor"),
             estado="asignada",
         )
     )
@@ -385,6 +395,9 @@ async def reasignar_taller(
             incidente_id=solicitud.incidente_id,
             taller_id=candidato["taller_id"],
             tecnico_id=None,
+            distancia_km=float(candidato.get("distancia_km", 0) or 0),
+            puntaje=float(candidato.get("puntaje", 0) or 0),
+            motivo_asignacion=str(candidato.get("motivo") or "Reasignación automática por motor"),
             estado="asignada",
         )
     )
