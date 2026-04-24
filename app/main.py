@@ -309,6 +309,74 @@ def _ensure_incremental_schema() -> None:
             if "observaciones_operativas" not in cols_taller:
                 conn.execute(text("ALTER TABLE talleres ADD COLUMN observaciones_operativas TEXT"))
 
+        if "vehiculos" in tables:
+            cols_vehiculos = {c["name"] for c in inspector.get_columns("vehiculos")}
+            if "cliente_id" not in cols_vehiculos:
+                conn.execute(
+                    text("ALTER TABLE vehiculos ADD COLUMN cliente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE vehiculos ADD COLUMN cliente_id CHAR(36)")
+                )
+            if "tipo" not in cols_vehiculos:
+                conn.execute(text("ALTER TABLE vehiculos ADD COLUMN tipo VARCHAR(40)"))
+            if "observacion" not in cols_vehiculos:
+                conn.execute(text("ALTER TABLE vehiculos ADD COLUMN observacion TEXT"))
+            if "activo" not in cols_vehiculos:
+                conn.execute(text("ALTER TABLE vehiculos ADD COLUMN activo BOOLEAN NOT NULL DEFAULT TRUE"))
+            if "creado_en" not in cols_vehiculos:
+                conn.execute(
+                    text("ALTER TABLE vehiculos ADD COLUMN creado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE vehiculos ADD COLUMN creado_en DATETIME")
+                )
+            if "actualizado_en" not in cols_vehiculos:
+                conn.execute(
+                    text("ALTER TABLE vehiculos ADD COLUMN actualizado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE vehiculos ADD COLUMN actualizado_en DATETIME")
+                )
+
+            if conn.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        """
+                        UPDATE vehiculos v
+                        SET cliente_id = c.id
+                        FROM clientes c
+                        WHERE c.usuario_id = v.usuario_id
+                          AND v.cliente_id IS NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE vehiculos
+                        SET activo = COALESCE(activo, TRUE),
+                            creado_en = COALESCE(creado_en, NOW()),
+                            actualizado_en = COALESCE(actualizado_en, NOW())
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        DO $$
+                        BEGIN
+                          IF NOT EXISTS (
+                            SELECT 1
+                            FROM pg_constraint
+                            WHERE conname = 'fk_vehiculos_cliente_id'
+                          ) THEN
+                            ALTER TABLE vehiculos
+                            ADD CONSTRAINT fk_vehiculos_cliente_id
+                            FOREIGN KEY (cliente_id) REFERENCES clientes(id) NOT VALID;
+                          END IF;
+                        END$$;
+                        """
+                    )
+                )
+
         fk_targets = [
             ("solicitudes", "incidente_id"),
             ("emergencias", "incidente_id"),

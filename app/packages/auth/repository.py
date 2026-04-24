@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.models.models import Rol, RolPermiso, Usuario, UsuarioRol
+from app.models.models import Cliente, Rol, RolPermiso, Usuario, UsuarioRol
 
 
 def get_usuario_by_id(db: Session, usuario_id: str) -> Usuario | None:
@@ -35,6 +35,10 @@ def crear_usuario(
         db.add(rol_obj)
         db.flush()
     db.add(UsuarioRol(usuario_id=usuario.id, rol_id=rol_obj.id))
+    if rol == "conductor":
+        cliente_existente = db.query(Cliente).filter(Cliente.usuario_id == usuario.id).first()
+        if not cliente_existente:
+            db.add(Cliente(usuario_id=usuario.id))
     db.commit()
     db.refresh(usuario)
     return usuario

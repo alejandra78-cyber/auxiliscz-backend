@@ -89,6 +89,7 @@ class Cliente(Base):
     creado_en = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="cliente")
+    vehiculos = relationship("Vehiculo", back_populates="cliente")
     solicitudes = relationship("Solicitud", back_populates="cliente")
     incidentes = relationship("Incidente", back_populates="cliente")
 
@@ -224,13 +225,20 @@ class Vehiculo(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
+    cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=True)
     placa = Column(String(20), unique=True, nullable=False)
     marca = Column(String(80))
     modelo = Column(String(80))
     anio = Column(Integer)
     color = Column(String(40))
+    tipo = Column(String(40))
+    observacion = Column(Text)
+    activo = Column(Boolean, default=True, nullable=False)
+    creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="vehiculos")
+    cliente = relationship("Cliente", back_populates="vehiculos")
     incidentes = relationship("Incidente", back_populates="vehiculo")
 
 

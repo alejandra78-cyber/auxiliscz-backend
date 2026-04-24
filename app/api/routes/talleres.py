@@ -58,6 +58,14 @@ NOMBRE_SERVICIO_POR_CODIGO = {
 }
 
 
+def _frontend_base_url() -> str:
+    base = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").strip()
+    base = base.rstrip("/")
+    if base.endswith("/login"):
+        base = base[:-6]
+    return base or "http://localhost:4200"
+
+
 class TallerCreate(BaseModel):
     usuario_id: str | None = None
     nombre: str = Field(..., min_length=3)
@@ -394,7 +402,7 @@ def _sincronizar_servicios_taller(db: Session, *, taller: Taller, codigos_servic
         servicio = _obtener_o_crear_servicio_por_codigo(db, codigo)
         target_ids.add(servicio.id)
         if codigo not in existentes_por_codigo:
-            db.add(TallerServicio(taller_id=taller.id, servicio_id=servicio.id))
+            db.add(TallerServicio(id=uuid.uuid4(), taller_id=taller.id, servicio_id=servicio.id))
 
     for codigo, rel in existentes_por_codigo.items():
         if rel.servicio_id not in target_ids:
@@ -460,7 +468,7 @@ def _sincronizar_especialidades_tecnico(db: Session, *, tecnico: Tecnico, servic
 
     for servicio in servicios:
         if servicio.id not in actuales_ids:
-            db.add(TecnicoEspecialidad(tecnico_id=tecnico.id, servicio_id=servicio.id))
+            db.add(TecnicoEspecialidad(id=uuid.uuid4(), tecnico_id=tecnico.id, servicio_id=servicio.id))
     for rel in actuales:
         if rel.servicio_id not in target_ids:
             db.delete(rel)
@@ -732,7 +740,7 @@ def _enviar_correo_activacion_tecnico(db: Session, *, tecnico: Tecnico, usuario:
         minutes=60 * 24,
         commit=False,
     )
-    frontend_url = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").rstrip("/")
+    frontend_url = _frontend_base_url()
     query = urlencode({"reset_token": token_activacion, "mode": "activation"})
     activation_url = f"{frontend_url}/recover-password?{query}"
     mail_ok = enviar_email(
@@ -928,7 +936,7 @@ def aprobar_solicitud_afiliacion_admin(
         minutes=60 * 24,
         commit=False,
     )
-    frontend_url = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").rstrip("/")
+    frontend_url = _frontend_base_url()
     query = urlencode({"reset_token": token_activacion, "mode": "activation"})
     activation_url = f"{frontend_url}/recover-password?{query}"
     mail_ok = enviar_email(
@@ -1454,16 +1462,6 @@ def registrar_tecnico(
         tecnico=tecnico,
         usuario=usuario_tecnico,
         current_user=current_user,
-    )
-    db.add(
-        Historial(
-            id=uuid.uuid4(),
-            solicitud_id=None,
-            incidente_id=None,
-            estado_anterior=None,
-            estado_nuevo="tecnico_registrado",
-            comentario=f"Técnico {tecnico.nombre} registrado en taller {taller.nombre}",
-        )
     )
     db.add(
         Notificacion(

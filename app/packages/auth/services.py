@@ -1,4 +1,5 @@
 import hashlib
+import os
 import secrets
 from datetime import timedelta
 from urllib.parse import urlencode
@@ -22,8 +23,23 @@ from .repository import (
 from .schemas import CambiarPasswordIn, RecuperarPasswordRequestOut
 
 
+def _normalizar_rol_cliente(rol: str | None) -> str:
+    value = (rol or "").strip().lower()
+    if value in {"cliente", "conductor"}:
+        return "conductor"
+    return value
+
+
+def _validar_password_segura(password: str) -> None:
+    pwd = (password or "").strip()
+    if len(pwd) < 6:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 6 caracteres")
+
+
 def registrar_usuario(db: Session, *, nombre: str, email: str, password: str, telefono: str | None, rol: str) -> Usuario:
-    rol_final = rol if rol in ROLES_VALIDOS else "conductor"
+    rol_normalizado = _normalizar_rol_cliente(rol)
+    rol_final = rol_normalizado if rol_normalizado in ROLES_VALIDOS else "conductor"
+    _validar_password_segura(password)
     if get_usuario_by_email(db, email):
         raise HTTPException(status_code=400, detail="El email ya está registrado")
     return crear_usuario(
@@ -78,6 +94,15 @@ def _new_raw_token() -> str:
     return secrets.token_urlsafe(48)
 
 
+def _frontend_base_url() -> str:
+    base = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").strip()
+    # Evita configuraciones comunes que rompen los links de recuperación.
+    base = base.rstrip("/")
+    if base.endswith("/login"):
+        base = base[:-6]
+    return base or "http://localhost:4200"
+
+
 def _issue_password_token(
     db: Session,
     *,
@@ -117,9 +142,7 @@ def solicitar_recuperacion_password(db: Session, *, email: str) -> RecuperarPass
             scope="password_recovery",
             minutes=30,
         )
-        frontend_url = "http://localhost:4200"
-        import os
-        frontend_url = os.getenv("FRONTEND_BASE_URL", frontend_url).rstrip("/")
+        frontend_url = _frontend_base_url()
         query = urlencode({"reset_token": raw_token})
         reset_url = f"{frontend_url}/recover-password?{query}"
         enviar_email(
@@ -182,8 +205,7 @@ def validar_token_password(db: Session, *, reset_token: str) -> tuple[PasswordRe
 
 def resetear_password(db: Session, *, reset_token: str, nueva_password: str) -> None:
     token_row, usuario = validar_token_password(db, reset_token=reset_token)
-    if len(nueva_password.strip()) < 6:
-        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 6 caracteres")
+    _validar_password_segura(nueva_password)
     nuevo_hash = get_password_hash(nueva_password)
     usuario.password_hash = nuevo_hash
     usuario.estado = "activo"
@@ -203,5 +225,6 @@ def cambiar_password(db: Session, usuario: Usuario, payload: CambiarPasswordIn) 
     if payload.password_actual == payload.password_nueva:
         raise HTTPException(status_code=400, detail="La nueva contraseña debe ser diferente a la actual")
 
+    _validar_password_segura(payload.password_nueva)
     nuevo_hash = get_password_hash(payload.password_nueva)
     actualizar_password(db, usuario, nuevo_hash)

@@ -4,10 +4,19 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_user
 
-from .schemas import EstadoSolicitudClienteOut, SolicitudSeguimientoOut, UbicacionTecnicoOut, VehiculoCreateIn, VehiculoOut
+from .schemas import (
+    EstadoSolicitudClienteOut,
+    SolicitudSeguimientoOut,
+    UbicacionTecnicoOut,
+    VehiculoCreateIn,
+    VehiculoOut,
+    VehiculoUpdateIn,
+)
 from .services import (
     consultar_estado_solicitud_cliente,
     consultar_estado_ultima_solicitud_cliente,
+    desactivar_vehiculo_cliente,
+    editar_vehiculo_cliente,
     listar_solicitudes_para_seguimiento,
     mis_vehiculos,
     registrar_vehiculo,
@@ -31,12 +40,43 @@ def registrar_vehiculo_endpoint(
         modelo=payload.modelo,
         anio=payload.anio,
         color=payload.color,
+        tipo=payload.tipo,
+        observacion=payload.observacion,
     )
 
 
 @router.get("/vehiculos", response_model=list[VehiculoOut])
 def mis_vehiculos_endpoint(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     return mis_vehiculos(db, current_user=current_user)
+
+
+@router.put("/vehiculos/{vehiculo_id}", response_model=VehiculoOut)
+def editar_vehiculo_endpoint(
+    vehiculo_id: str,
+    payload: VehiculoUpdateIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return editar_vehiculo_cliente(
+        db,
+        current_user=current_user,
+        vehiculo_id=vehiculo_id,
+        marca=payload.marca,
+        modelo=payload.modelo,
+        anio=payload.anio,
+        color=payload.color,
+        tipo=payload.tipo,
+        observacion=payload.observacion,
+    )
+
+
+@router.patch("/vehiculos/{vehiculo_id}/desactivar", response_model=VehiculoOut)
+def desactivar_vehiculo_endpoint(
+    vehiculo_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return desactivar_vehiculo_cliente(db, current_user=current_user, vehiculo_id=vehiculo_id)
 
 
 @router.get("/solicitudes/ultima/estado", response_model=EstadoSolicitudClienteOut)

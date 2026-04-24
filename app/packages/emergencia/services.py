@@ -7,7 +7,7 @@ from app.ai_modules.audio import transcribir_audio
 from app.ai_modules.clasificador import clasificar_incidente
 from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
-from app.models.models import Solicitud, Usuario
+from app.models.models import Solicitud, Usuario, Vehiculo
 from app.services.notificaciones import enviar_push
 
 from .repository import (
@@ -81,6 +81,14 @@ async def reportar_emergencia(
     foto: UploadFile | None,
     audio: UploadFile | None,
 ) -> str:
+    vehiculo = (
+        db.query(Vehiculo)
+        .filter(Vehiculo.id == vehiculo_id, Vehiculo.usuario_id == current_user.id, Vehiculo.activo == True)  # noqa: E712
+        .first()
+    )
+    if not vehiculo:
+        raise HTTPException(status_code=400, detail="El vehículo no existe o no pertenece al cliente autenticado")
+
     tipo_normalizado = (tipo or "otro").strip().lower()
     if tipo_normalizado not in TIPOS_INCIDENTE_VALIDOS:
         tipo_normalizado = "otro"
