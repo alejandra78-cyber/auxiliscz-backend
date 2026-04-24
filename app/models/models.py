@@ -147,6 +147,8 @@ class Taller(Base):
     disponibilidades = relationship("Disponibilidad", back_populates="taller")
     metricas = relationship("Metrica", back_populates="taller")
     asignaciones = relationship("Asignacion", back_populates="taller")
+    taller_servicios = relationship("TallerServicio", back_populates="taller")
+    servicios_rel = relationship("Servicio", secondary="taller_servicios", viewonly=True)
 
 
 class Tecnico(Base):
@@ -156,7 +158,18 @@ class Tecnico(Base):
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=False)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), unique=True, nullable=True)
     nombre = Column(String(100), nullable=False)
+    email = Column(String(150))
+    telefono = Column(String(20))
+    especialidad = Column(String(120))
+    estado_operativo = Column(String(30), default="disponible", nullable=False)
+    activo = Column(Boolean, default=True, nullable=False)
     disponible = Column(Boolean, default=True)
+    latitud_actual = Column(Float)
+    longitud_actual = Column(Float)
+    ultima_actualizacion_ubicacion = Column(DateTime)
+    creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
+    # Compatibilidad legacy
     lat_actual = Column(Float)
     lng_actual = Column(Float)
 
@@ -165,6 +178,45 @@ class Tecnico(Base):
     turnos = relationship("Turno", back_populates="tecnico")
     asignaciones = relationship("Asignacion", back_populates="tecnico")
     disponibilidades = relationship("Disponibilidad", back_populates="tecnico")
+    tecnico_especialidades = relationship("TecnicoEspecialidad", back_populates="tecnico")
+    especialidades_rel = relationship("Servicio", secondary="tecnico_especialidades", viewonly=True)
+
+
+class Servicio(Base):
+    __tablename__ = "servicios"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    codigo = Column(String(80), unique=True, nullable=False, index=True)
+    nombre_visible = Column(String(120), nullable=False)
+    activo = Column(Boolean, default=True, nullable=False)
+    creado_en = Column(DateTime, default=local_now_naive)
+
+    taller_servicios = relationship("TallerServicio", back_populates="servicio")
+    tecnico_especialidades = relationship("TecnicoEspecialidad", back_populates="servicio")
+
+
+class TallerServicio(Base):
+    __tablename__ = "taller_servicios"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=False, index=True)
+    servicio_id = Column(GUID(), ForeignKey("servicios.id"), nullable=False, index=True)
+    creado_en = Column(DateTime, default=local_now_naive)
+
+    taller = relationship("Taller", back_populates="taller_servicios")
+    servicio = relationship("Servicio", back_populates="taller_servicios")
+
+
+class TecnicoEspecialidad(Base):
+    __tablename__ = "tecnico_especialidades"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=False, index=True)
+    servicio_id = Column(GUID(), ForeignKey("servicios.id"), nullable=False, index=True)
+    creado_en = Column(DateTime, default=local_now_naive)
+
+    tecnico = relationship("Tecnico", back_populates="tecnico_especialidades")
+    servicio = relationship("Servicio", back_populates="tecnico_especialidades")
 
 
 class Vehiculo(Base):
@@ -277,7 +329,13 @@ class Asignacion(Base):
     puntaje = Column(Float)
     motivo_asignacion = Column(Text)
     fecha_respuesta_taller = Column(DateTime)
+    fecha_aceptacion = Column(DateTime)
+    fecha_inicio_camino = Column(DateTime)
+    fecha_inicio_servicio = Column(DateTime)
+    fecha_finalizacion = Column(DateTime)
+    observacion_estado = Column(Text)
     motivo_rechazo = Column(Text)
+    origen_asignacion = Column(String(30), default="manual")
     estado = Column(String(50), default="asignada")
     asignado_en = Column(DateTime, default=local_now_naive)
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -6,6 +6,7 @@ from app.core.security import get_current_user
 
 from .schemas import (
     ActualizarEstadoIn,
+    AsignacionCandidatoOut,
     AsignacionOut,
     AsignarServicioIn,
     BuscarCandidatosIn,
@@ -28,6 +29,7 @@ from .services import (
     estado_paquete_asignacion,
     listar_servicios_catalogo,
     listar_solicitudes_servicio,
+    listar_candidatos_para_solicitud,
     listar_tecnicos_disponibles,
     obtener_detalle_solicitud_servicio,
     reasignar_taller,
@@ -74,6 +76,7 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
         usuario_id=str(i.cliente.usuario_id) if i.cliente else "",
         taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
         taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
+        estado_asignacion=(str(ultimo.estado) if ultimo and ultimo.estado else None),
         tecnico_id=str(ultimo.tecnico_id) if ultimo and ultimo.tecnico_id else None,
         tecnico_nombre=ultimo.tecnico.nombre if ultimo and ultimo.tecnico else None,
         servicio=ultimo.servicio if ultimo and ultimo.servicio else None,
@@ -83,6 +86,7 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
         distancia_km=(float(ultimo.distancia_km) if ultimo and ultimo.distancia_km is not None else None),
         puntaje_asignacion=(float(ultimo.puntaje) if ultimo and ultimo.puntaje is not None else None),
         motivo_asignacion=(str(ultimo.motivo_asignacion) if ultimo and ultimo.motivo_asignacion else None),
+        origen_asignacion=(str(ultimo.origen_asignacion) if ultimo and ultimo.origen_asignacion else None),
         motivo_rechazo=(str(ultimo.motivo_rechazo) if ultimo and ultimo.motivo_rechazo else None),
         fecha_asignacion=((ultimo.fecha_asignacion or ultimo.asignado_en).isoformat() if ultimo and (ultimo.fecha_asignacion or ultimo.asignado_en) else None),
         fecha_respuesta_taller=(ultimo.fecha_respuesta_taller.isoformat() if ultimo and ultimo.fecha_respuesta_taller else None),
@@ -116,24 +120,42 @@ def estado():
 
 @router.post("/candidatos")
 async def buscar_candidatos(payload: BuscarCandidatosIn, db: Session = Depends(get_db)):
+    if payload.lat is None or payload.lng is None:
+        return []
     return await buscar_talleres_candidatos_cercanos(
         db,
         lat=payload.lat,
         lng=payload.lng,
-        tipo=payload.tipo,
-        prioridad=payload.prioridad,
+        tipo=payload.tipo or "otro",
+        prioridad=payload.prioridad or 2,
     )
 
 
+@router.get("/candidatos/{incidente_id}", response_model=list[AsignacionCandidatoOut])
+def listar_candidatos_incidente(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return listar_candidatos_para_solicitud(db, incidente_id=incidente_id, current_user=current_user)
+
+
 @router.post("/asignar/{incidente_id}", response_model=AsignacionOut)
-async def asignar_automatico(incidente_id: str, payload: BuscarCandidatosIn, db: Session = Depends(get_db)):
+async def asignar_automatico(
+    incidente_id: str,
+    payload: BuscarCandidatosIn | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol not in {"admin", "taller"}:
+        raise HTTPException(status_code=403, detail="No autorizado para ejecutar asignación inteligente")
     taller = await asignar_taller_automaticamente(
         db,
         solicitud_id=incidente_id,
-        lat=payload.lat,
-        lng=payload.lng,
-        tipo=payload.tipo,
-        prioridad=payload.prioridad,
+        lat=(payload.lat if payload else None),
+        lng=(payload.lng if payload else None),
+        tipo=(payload.tipo if payload else None),
+        prioridad=(payload.prioridad if payload else None),
     )
     if not taller:
         return AsignacionOut(mensaje="No se encontraron talleres disponibles")
@@ -145,14 +167,21 @@ async def asignar_automatico(incidente_id: str, payload: BuscarCandidatosIn, db:
 
 
 @router.post("/reasignar/{incidente_id}", response_model=AsignacionOut)
-async def reasignar(incidente_id: str, payload: BuscarCandidatosIn, db: Session = Depends(get_db)):
+async def reasignar(
+    incidente_id: str,
+    payload: BuscarCandidatosIn | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol not in {"admin", "taller"}:
+        raise HTTPException(status_code=403, detail="No autorizado para ejecutar reasignación inteligente")
     candidato = await reasignar_taller(
         db,
         solicitud_id=incidente_id,
-        lat=payload.lat,
-        lng=payload.lng,
-        tipo=payload.tipo,
-        prioridad=payload.prioridad,
+        lat=(payload.lat if payload else None),
+        lng=(payload.lng if payload else None),
+        tipo=(payload.tipo if payload else None),
+        prioridad=(payload.prioridad if payload else None),
     )
     if not candidato:
         return AsignacionOut(mensaje="No hay un candidato alternativo para reasignar")
@@ -308,5 +337,6 @@ def actualizar_estado_endpoint(
         estado=payload.estado,
         observacion=payload.observacion,
         costo=payload.costo,
+        tecnico_id=payload.tecnico_id,
     )
     return _to_solicitud_out(i)

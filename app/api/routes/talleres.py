@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import unicodedata
 import uuid
 from urllib.parse import urlencode
 from uuid import UUID
@@ -25,10 +26,13 @@ from app.models.models import (
     Historial,
     Notificacion,
     Rol,
+    Servicio,
     SolicitudTaller,
     Solicitud,
     Taller,
+    TallerServicio,
     Tecnico,
+    TecnicoEspecialidad,
     Turno,
     Ubicacion,
     Usuario,
@@ -38,7 +42,20 @@ from app.services.emailer import enviar_email
 
 router = APIRouter()
 ESTADOS_OPERATIVOS_VALIDOS = {"disponible", "ocupado", "cerrado", "fuera_de_servicio"}
-ESTADOS_ASIGNACION_ACTIVA = {"asignada", "en_proceso"}
+ESTADOS_ASIGNACION_ACTIVA = {"aceptada", "tecnico_asignado", "en_camino", "en_proceso", "asignada"}
+ESTADOS_TECNICO_VALIDOS = {"disponible", "ocupado", "en_camino", "en_proceso", "fuera_de_servicio"}
+NOMBRE_SERVICIO_POR_CODIGO = {
+    "bateria": "Batería",
+    "llanta": "Cambio de llanta",
+    "motor": "Motor",
+    "choque": "Choque",
+    "remolque": "Remolque / Grúa",
+    "arranque_de_emergencia": "Arranque de emergencia",
+    "auxilio_de_combustible": "Auxilio de combustible",
+    "cerrajeria_automotriz": "Cerrajería automotriz",
+    "diagnostico_electrico": "Diagnóstico eléctrico",
+    "otros": "Otros",
+}
 
 
 class TallerCreate(BaseModel):
@@ -81,7 +98,12 @@ class TallerOut(BaseModel):
 
 
 class TecnicoCreate(BaseModel):
-    usuario_id: str
+    usuario_id: str | None = None
+    nombre: str | None = Field(default=None, min_length=3, max_length=120)
+    email: EmailStr | None = None
+    telefono: str | None = Field(default=None, min_length=6, max_length=20)
+    especialidad: str | None = Field(default=None, max_length=120)
+    servicio_ids: list[UUID] = Field(default_factory=list)
     disponible: bool = True
 
 
@@ -90,10 +112,34 @@ class TecnicoOut(BaseModel):
     usuario_id: UUID | None = None
     email: str | None = None
     nombre: str
+    telefono: str | None = None
+    especialidad: str | None = None
+    servicio_ids: list[UUID] = Field(default_factory=list)
+    especialidades: list[str] = Field(default_factory=list)
+    especialidades_nombres: list[str] = Field(default_factory=list)
+    estado_operativo: str = "disponible"
+    activo: bool = True
     disponible: bool
+    latitud_actual: float | None = None
+    longitud_actual: float | None = None
+    ultima_actualizacion_ubicacion: str | None = None
 
     class Config:
         from_attributes = True
+
+
+class TecnicoUpdateIn(BaseModel):
+    nombre: str | None = Field(default=None, min_length=3, max_length=120)
+    telefono: str | None = Field(default=None, min_length=6, max_length=20)
+    especialidad: str | None = Field(default=None, max_length=120)
+    estado_operativo: str | None = None
+    disponible: bool | None = None
+
+
+class TecnicoEstadoIn(BaseModel):
+    activo: bool | None = None
+    estado_operativo: str | None = None
+    disponible: bool | None = None
 
 
 class TecnicoCandidatoOut(BaseModel):
@@ -105,6 +151,16 @@ class TecnicoCandidatoOut(BaseModel):
 class TallerAdminOptionOut(BaseModel):
     id: UUID
     nombre: str
+
+
+class ServicioOut(BaseModel):
+    id: UUID
+    codigo: str
+    nombre_visible: str
+    activo: bool
+
+    class Config:
+        from_attributes = True
 
 
 class DisponibilidadIn(BaseModel):
@@ -278,10 +334,28 @@ def _parse_servicios_raw(servicios: str | list[str] | None) -> list[str]:
 
 
 def _normalizar_servicios(servicios: list[str]) -> list[str]:
+    alias_map = {
+        "remolque_grua": "remolque",
+        "remolque_y_grua": "remolque",
+        "cambio_llanta": "llanta",
+        "cambio_de_llanta": "llanta",
+    }
     normalizados: list[str] = []
     seen: set[str] = set()
     for s in servicios:
-        v = (s or "").strip().lower().replace(" ", "_")
+        raw = (s or "").strip()
+        if not raw:
+            continue
+        sin_acentos = (
+            unicodedata.normalize("NFD", raw)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        v = "".join(ch.lower() if ch.isalnum() else "_" for ch in sin_acentos)
+        while "__" in v:
+            v = v.replace("__", "_")
+        v = v.strip("_")
+        v = alias_map.get(v, v)
         if not v:
             continue
         if v not in seen:
@@ -290,8 +364,112 @@ def _normalizar_servicios(servicios: list[str]) -> list[str]:
     return normalizados
 
 
+def _nombre_visible_servicio(codigo: str) -> str:
+    if codigo in NOMBRE_SERVICIO_POR_CODIGO:
+        return NOMBRE_SERVICIO_POR_CODIGO[codigo]
+    return codigo.replace("_", " ").strip().title()
+
+
+def _obtener_o_crear_servicio_por_codigo(db: Session, codigo: str) -> Servicio:
+    servicio = db.query(Servicio).filter(Servicio.codigo == codigo).first()
+    if not servicio:
+        servicio = Servicio(codigo=codigo, nombre_visible=_nombre_visible_servicio(codigo), activo=True)
+        db.add(servicio)
+        db.flush()
+    return servicio
+
+
+def _sincronizar_servicios_taller(db: Session, *, taller: Taller, codigos_servicio: list[str]) -> None:
+    codigos = _normalizar_servicios(codigos_servicio)
+    existentes = (
+        db.query(TallerServicio)
+        .join(Servicio, Servicio.id == TallerServicio.servicio_id)
+        .filter(TallerServicio.taller_id == taller.id)
+        .all()
+    )
+    existentes_por_codigo = {row.servicio.codigo: row for row in existentes if row.servicio}
+
+    target_ids: set[UUID] = set()
+    for codigo in codigos:
+        servicio = _obtener_o_crear_servicio_por_codigo(db, codigo)
+        target_ids.add(servicio.id)
+        if codigo not in existentes_por_codigo:
+            db.add(TallerServicio(taller_id=taller.id, servicio_id=servicio.id))
+
+    for codigo, rel in existentes_por_codigo.items():
+        if rel.servicio_id not in target_ids:
+            db.delete(rel)
+
+
+def _servicios_de_taller(db: Session, *, taller: Taller) -> list[Servicio]:
+    rows = (
+        db.query(Servicio)
+        .join(TallerServicio, TallerServicio.servicio_id == Servicio.id)
+        .filter(TallerServicio.taller_id == taller.id, Servicio.activo.is_(True))
+        .order_by(Servicio.nombre_visible.asc())
+        .all()
+    )
+    return rows
+
+
+def _parse_especialidades(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return _normalizar_servicios([x.strip() for x in raw.split(",") if x.strip()])
+
+
+def _validar_especialidades_tecnico_con_taller(db: Session, *, taller: Taller, especialidad_raw: str | None) -> str | None:
+    especialidades = _parse_especialidades(especialidad_raw)
+    if not especialidades:
+        return None
+    servicios_taller = {s.codigo for s in _servicios_de_taller(db, taller=taller)}
+    invalidas = [esp for esp in especialidades if esp not in servicios_taller]
+    if invalidas:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Especialidades no válidas para este taller: "
+                + ", ".join(invalidas)
+                + ". Deben estar dentro de los servicios configurados en CU07."
+            ),
+        )
+    return ", ".join(especialidades)
+
+
+def _validar_servicio_ids_con_taller(db: Session, *, taller: Taller, servicio_ids: list[UUID]) -> list[Servicio]:
+    if not servicio_ids:
+        return []
+    rows = (
+        db.query(Servicio)
+        .join(TallerServicio, TallerServicio.servicio_id == Servicio.id)
+        .filter(TallerServicio.taller_id == taller.id, Servicio.id.in_(servicio_ids), Servicio.activo.is_(True))
+        .all()
+    )
+    if len(rows) != len(set(servicio_ids)):
+        raise HTTPException(
+            status_code=400,
+            detail="Uno o más servicio_id no pertenecen al taller o están inactivos",
+        )
+    return rows
+
+
+def _sincronizar_especialidades_tecnico(db: Session, *, tecnico: Tecnico, servicios: list[Servicio]) -> None:
+    actuales = db.query(TecnicoEspecialidad).filter(TecnicoEspecialidad.tecnico_id == tecnico.id).all()
+    actuales_ids = {x.servicio_id for x in actuales}
+    target_ids = {s.id for s in servicios}
+
+    for servicio in servicios:
+        if servicio.id not in actuales_ids:
+            db.add(TecnicoEspecialidad(tecnico_id=tecnico.id, servicio_id=servicio.id))
+    for rel in actuales:
+        if rel.servicio_id not in target_ids:
+            db.delete(rel)
+
+    tecnico.especialidad = ", ".join(sorted({s.codigo for s in servicios})) if servicios else None
+
+
 def _build_disponibilidad_out(db: Session, taller: Taller) -> DisponibilidadTallerOut:
-    servicios = _parse_servicios_raw(taller.servicios)
+    servicios = [s.codigo for s in _servicios_de_taller(db, taller=taller)]
     tecnicos = db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
     tecnicos_totales = len(tecnicos)
     tecnicos_disponibles = sum(1 for t in tecnicos if t.disponible)
@@ -454,6 +632,131 @@ def _obtener_tecnico_de_usuario(db: Session, current_user: Usuario) -> Tecnico |
     return db.query(Tecnico).filter(Tecnico.nombre == current_user.nombre).first()
 
 
+def _asegurar_rol_tecnico(db: Session, usuario: Usuario) -> None:
+    rol_tecnico = db.query(Rol).filter(Rol.nombre == "tecnico").first()
+    if not rol_tecnico:
+        rol_tecnico = Rol(nombre="tecnico", descripcion="Rol técnico")
+        db.add(rol_tecnico)
+        db.flush()
+    existe = (
+        db.query(UsuarioRol)
+        .filter(UsuarioRol.usuario_id == usuario.id, UsuarioRol.rol_id == rol_tecnico.id)
+        .first()
+    )
+    if not existe:
+        db.add(UsuarioRol(usuario_id=usuario.id, rol_id=rol_tecnico.id))
+        db.flush()
+
+
+def _resolve_or_create_tecnico_user(
+    db: Session,
+    *,
+    usuario_id: str | None,
+    nombre: str | None,
+    email: str | None,
+    telefono: str | None,
+) -> tuple[Usuario, bool]:
+    if usuario_id:
+        usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+        if not usuario:
+            raise HTTPException(status_code=404, detail="El usuario técnico no existe")
+        _asegurar_rol_tecnico(db, usuario)
+        return usuario, False
+
+    if not email or not nombre:
+        raise HTTPException(
+            status_code=422,
+            detail="Debes enviar usuario_id o nombre + email para registrar técnico",
+        )
+
+    email_normalizado = email.strip().lower()
+    usuario = db.query(Usuario).filter(func.lower(Usuario.email) == email_normalizado).first()
+    was_created = False
+    if not usuario:
+        password_temporal = f"Tec-{secrets.token_urlsafe(10)}"
+        usuario = Usuario(
+            nombre=nombre.strip(),
+            email=email_normalizado,
+            password_hash=get_password_hash(password_temporal),
+            telefono=telefono,
+            estado="pendiente",
+        )
+        db.add(usuario)
+        db.flush()
+        was_created = True
+    else:
+        if nombre:
+            usuario.nombre = nombre.strip()
+        if telefono is not None:
+            usuario.telefono = telefono.strip() or None
+        db.add(usuario)
+        db.flush()
+
+    _asegurar_rol_tecnico(db, usuario)
+    return usuario, was_created
+
+
+def _to_tecnico_out(tecnico: Tecnico) -> TecnicoOut:
+    lat = tecnico.latitud_actual if tecnico.latitud_actual is not None else tecnico.lat_actual
+    lng = tecnico.longitud_actual if tecnico.longitud_actual is not None else tecnico.lng_actual
+    servicios = []
+    if tecnico.tecnico_especialidades:
+        servicios = [rel.servicio for rel in tecnico.tecnico_especialidades if rel.servicio and rel.servicio.activo]
+    codigos = [s.codigo for s in servicios]
+    nombres = [s.nombre_visible for s in servicios]
+    return TecnicoOut(
+        id=tecnico.id,
+        usuario_id=tecnico.usuario_id,
+        email=tecnico.email or (tecnico.usuario.email if tecnico.usuario else None),
+        nombre=tecnico.nombre,
+        telefono=tecnico.telefono or (tecnico.usuario.telefono if tecnico.usuario else None),
+        especialidad=tecnico.especialidad,
+        servicio_ids=[s.id for s in servicios],
+        especialidades=codigos,
+        especialidades_nombres=nombres,
+        estado_operativo=(tecnico.estado_operativo or "disponible"),
+        activo=bool(tecnico.activo if tecnico.activo is not None else True),
+        disponible=bool(tecnico.disponible),
+        latitud_actual=lat,
+        longitud_actual=lng,
+        ultima_actualizacion_ubicacion=(
+            tecnico.ultima_actualizacion_ubicacion.isoformat() if tecnico.ultima_actualizacion_ubicacion else None
+        ),
+    )
+
+
+def _enviar_correo_activacion_tecnico(db: Session, *, tecnico: Tecnico, usuario: Usuario, current_user: Usuario) -> bool:
+    token_activacion = generar_token_activacion_cuenta(
+        db,
+        str(usuario.id),
+        minutes=60 * 24,
+        commit=False,
+    )
+    frontend_url = os.getenv("FRONTEND_BASE_URL", "http://localhost:4200").rstrip("/")
+    query = urlencode({"reset_token": token_activacion, "mode": "activation"})
+    activation_url = f"{frontend_url}/recover-password?{query}"
+    mail_ok = enviar_email(
+        usuario.email,
+        "AuxilioSCZ - Activación de cuenta técnico",
+        (
+            f"Hola {usuario.nombre},\n\n"
+            "Fuiste registrado como técnico en AuxilioSCZ.\n"
+            "Para activar tu cuenta y crear contraseña, ingresa al siguiente enlace:\n\n"
+            f"{activation_url}\n\n"
+            "Este enlace expira en 24 horas.\n"
+        ),
+    )
+    db.add(
+        Auditoria(
+            usuario_id=current_user.id,
+            accion="correo_activacion_tecnico",
+            modulo="talleres",
+            detalle=f"Correo de activación {'enviado' if mail_ok else 'no_enviado'} a {usuario.email} para técnico {tecnico.id}",
+        )
+    )
+    return mail_ok
+
+
 @router.post("/solicitudes-afiliacion", response_model=SolicitudAfiliacionOut)
 def registrar_solicitud_afiliacion_publica(
     payload: SolicitudAfiliacionPublicIn,
@@ -584,6 +887,11 @@ def aprobar_solicitud_afiliacion_admin(
         )
         db.add(taller)
         db.flush()
+    _sincronizar_servicios_taller(
+        db,
+        taller=taller,
+        codigos_servicio=_normalizar_servicios(_parse_servicios_raw(solicitud.servicios)),
+    )
 
     usuario.estado = "pendiente_activacion"
     db.add(usuario)
@@ -755,6 +1063,11 @@ def crear_taller(
                 detalle=f"Usuario {'creado' if usuario_creado else 'reutilizado'} para onboarding de taller: {usuario_taller.email}",
             )
         )
+    _sincronizar_servicios_taller(
+        db,
+        taller=taller,
+        codigos_servicio=_normalizar_servicios(datos.servicios),
+    )
     try:
         db.commit()
         db.refresh(taller)
@@ -900,6 +1213,32 @@ def mi_taller(db: Session = Depends(get_db), current_user=Depends(get_current_us
     return _to_taller_out(_obtener_taller_de_usuario(db, current_user))
 
 
+@router.get("/servicios", response_model=list[ServicioOut])
+def listar_servicios_mi_taller(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo un taller puede consultar sus servicios")
+    taller = _obtener_taller_de_usuario(db, current_user)
+    # Garantiza relaciones persistidas para evitar IDs temporales en frontend.
+    codigos_legacy = _normalizar_servicios(_parse_servicios_raw(taller.servicios))
+    if codigos_legacy:
+        _sincronizar_servicios_taller(db, taller=taller, codigos_servicio=codigos_legacy)
+        db.commit()
+        db.refresh(taller)
+    servicios = _servicios_de_taller(db, taller=taller)
+    return [
+        ServicioOut(
+            id=s.id,
+            codigo=s.codigo,
+            nombre_visible=s.nombre_visible,
+            activo=bool(s.activo),
+        )
+        for s in servicios
+    ]
+
+
 @router.get("/mi-taller/disponibilidad", response_model=DisponibilidadTallerOut)
 def obtener_disponibilidad_mi_taller(
     db: Session = Depends(get_db),
@@ -964,6 +1303,7 @@ def cambiar_disponibilidad(
         if not nuevos_servicios:
             raise HTTPException(status_code=400, detail="Debes seleccionar al menos un servicio")
         taller.servicios = json.dumps(nuevos_servicios)
+    _sincronizar_servicios_taller(db, taller=taller, codigos_servicio=nuevos_servicios)
 
     if payload.latitud is not None:
         taller.latitud = payload.latitud
@@ -1044,41 +1384,118 @@ def registrar_tecnico(
         raise HTTPException(status_code=403, detail="Solo un taller puede registrar técnicos")
 
     taller = _obtener_taller_de_usuario(db, current_user)
-    usuario_tecnico = db.query(Usuario).filter(Usuario.id == payload.usuario_id).first()
-    if not usuario_tecnico:
-        raise HTTPException(status_code=404, detail="El usuario técnico no existe")
-
-    rol_tecnico = db.query(Rol).filter(Rol.nombre == "tecnico").first()
-    if not rol_tecnico:
-        raise HTTPException(status_code=400, detail="No existe el rol 'tecnico' en el sistema")
-    has_tecnico_role = (
-        db.query(UsuarioRol)
-        .filter(UsuarioRol.usuario_id == usuario_tecnico.id, UsuarioRol.rol_id == rol_tecnico.id)
-        .first()
+    codigos_legacy = _normalizar_servicios(_parse_servicios_raw(taller.servicios))
+    if codigos_legacy:
+        _sincronizar_servicios_taller(db, taller=taller, codigos_servicio=codigos_legacy)
+        db.flush()
+    usuario_tecnico, was_created = _resolve_or_create_tecnico_user(
+        db,
+        usuario_id=payload.usuario_id,
+        nombre=payload.nombre,
+        email=payload.email,
+        telefono=payload.telefono,
     )
-    if not has_tecnico_role:
-        raise HTTPException(status_code=400, detail="El usuario seleccionado no tiene rol técnico")
+    if not usuario_tecnico.email:
+        raise HTTPException(status_code=400, detail="El técnico debe tener un email válido")
 
     existe_vinculo = db.query(Tecnico).filter(Tecnico.usuario_id == usuario_tecnico.id).first()
-    if existe_vinculo:
-        raise HTTPException(status_code=400, detail="Este usuario técnico ya está vinculado a un taller")
+    if existe_vinculo and str(existe_vinculo.taller_id) != str(taller.id):
+        raise HTTPException(status_code=409, detail="Este técnico ya está vinculado a otro taller")
+    if existe_vinculo and str(existe_vinculo.taller_id) == str(taller.id):
+        raise HTTPException(status_code=409, detail="Este técnico ya está registrado en tu taller")
 
+    servicios_taller = _servicios_de_taller(db, taller=taller)
+    if not servicios_taller:
+        raise HTTPException(
+            status_code=400,
+            detail="Primero configure los servicios que ofrece el taller en CU07",
+        )
+
+    servicios_especialidad: list[Servicio]
+    if payload.servicio_ids:
+        servicios_especialidad = _validar_servicio_ids_con_taller(
+            db,
+            taller=taller,
+            servicio_ids=payload.servicio_ids,
+        )
+    else:
+        especialidad_normalizada = _validar_especialidades_tecnico_con_taller(
+            db,
+            taller=taller,
+            especialidad_raw=payload.especialidad,
+        )
+        if especialidad_normalizada:
+            codigos = _parse_especialidades(especialidad_normalizada)
+            servicios_taller_por_codigo = {s.codigo: s for s in servicios_taller}
+            servicios_especialidad = [servicios_taller_por_codigo[c] for c in codigos if c in servicios_taller_por_codigo]
+        else:
+            servicios_especialidad = []
+    if not servicios_especialidad:
+        raise HTTPException(status_code=400, detail="Debes seleccionar al menos una especialidad del taller")
+
+    estado_operativo = "disponible" if payload.disponible else "ocupado"
     tecnico = Tecnico(
         taller_id=taller.id,
         usuario_id=usuario_tecnico.id,
-        nombre=usuario_tecnico.nombre,
-        disponible=payload.disponible,
+        nombre=(payload.nombre or usuario_tecnico.nombre).strip(),
+        email=usuario_tecnico.email,
+        telefono=payload.telefono or usuario_tecnico.telefono,
+        especialidad=", ".join(sorted({s.codigo for s in servicios_especialidad})),
+        estado_operativo=estado_operativo,
+        activo=True,
+        disponible=bool(payload.disponible),
     )
     db.add(tecnico)
+    db.flush()
+    _sincronizar_especialidades_tecnico(db, tecnico=tecnico, servicios=servicios_especialidad)
+
+    mail_ok = _enviar_correo_activacion_tecnico(
+        db,
+        tecnico=tecnico,
+        usuario=usuario_tecnico,
+        current_user=current_user,
+    )
+    db.add(
+        Historial(
+            id=uuid.uuid4(),
+            solicitud_id=None,
+            incidente_id=None,
+            estado_anterior=None,
+            estado_nuevo="tecnico_registrado",
+            comentario=f"Técnico {tecnico.nombre} registrado en taller {taller.nombre}",
+        )
+    )
+    db.add(
+        Notificacion(
+            id=uuid.uuid4(),
+            usuario_id=usuario_tecnico.id,
+            solicitud_id=None,
+            incidente_id=None,
+            titulo="Activación de cuenta técnica",
+            mensaje=(
+                "Tu cuenta de técnico fue creada. Revisa tu correo para definir contraseña."
+                if mail_ok
+                else "Tu cuenta técnica fue creada. Solicita reenvío del enlace de activación."
+            ),
+            tipo="activacion_tecnico",
+            estado="no_leida",
+        )
+    )
+    db.add(
+        Auditoria(
+            id=uuid.uuid4(),
+            usuario_id=current_user.id,
+            accion="cu08_registrar_tecnico",
+            modulo="talleres",
+            detalle=(
+                f"tecnico_id={tecnico.id}; usuario_id={usuario_tecnico.id}; "
+                f"email={usuario_tecnico.email}; creado_usuario={was_created}; correo_enviado={mail_ok}"
+            ),
+        )
+    )
     db.commit()
     db.refresh(tecnico)
-    return TecnicoOut(
-        id=tecnico.id,
-        usuario_id=tecnico.usuario_id,
-        email=usuario_tecnico.email,
-        nombre=tecnico.nombre,
-        disponible=tecnico.disponible,
-    )
+    return _to_tecnico_out(tecnico)
 
 
 @router.get("/mi-taller/tecnicos", response_model=list[TecnicoOut])
@@ -1089,19 +1506,14 @@ def listar_tecnicos_mi_taller(
     if current_user.rol != "taller":
         raise HTTPException(status_code=403, detail="Solo un taller puede listar técnicos")
     taller = _obtener_taller_de_usuario(db, current_user)
-    rows = db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
-    out: list[TecnicoOut] = []
-    for t in rows:
-        out.append(
-            TecnicoOut(
-                id=t.id,
-                usuario_id=t.usuario_id,
-                email=t.usuario.email if t.usuario else None,
-                nombre=t.nombre,
-                disponible=t.disponible,
-            )
-        )
-    return out
+    rows = (
+        db.query(Tecnico)
+        .options(joinedload(Tecnico.tecnico_especialidades).joinedload(TecnicoEspecialidad.servicio))
+        .filter(Tecnico.taller_id == taller.id)
+        .order_by(Tecnico.creado_en.desc().nullslast(), Tecnico.nombre.asc())
+        .all()
+    )
+    return [_to_tecnico_out(t) for t in rows]
 
 
 @router.get("/admin/talleres/{taller_id}/tecnicos", response_model=list[TecnicoOut])
@@ -1115,17 +1527,172 @@ def listar_tecnicos_taller_admin(
     taller = db.query(Taller).filter(Taller.id == taller_id).first()
     if not taller:
         raise HTTPException(status_code=404, detail="Taller no encontrado")
-    rows = db.query(Tecnico).filter(Tecnico.taller_id == taller.id).all()
-    return [
-        TecnicoOut(
-            id=t.id,
-            usuario_id=t.usuario_id,
-            email=t.usuario.email if t.usuario else None,
-            nombre=t.nombre,
-            disponible=t.disponible,
+    rows = (
+        db.query(Tecnico)
+        .options(joinedload(Tecnico.tecnico_especialidades).joinedload(TecnicoEspecialidad.servicio))
+        .filter(Tecnico.taller_id == taller.id)
+        .order_by(Tecnico.creado_en.desc().nullslast(), Tecnico.nombre.asc())
+        .all()
+    )
+    return [_to_tecnico_out(t) for t in rows]
+
+
+@router.put("/mi-taller/tecnicos/{tecnico_id}", response_model=TecnicoOut)
+def actualizar_tecnico(
+    tecnico_id: str,
+    payload: TecnicoUpdateIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo un taller puede editar técnicos")
+
+    taller = _obtener_taller_de_usuario(db, current_user)
+    tecnico = db.query(Tecnico).filter(Tecnico.id == tecnico_id, Tecnico.taller_id == taller.id).first()
+    if not tecnico:
+        raise HTTPException(status_code=404, detail="Técnico no encontrado en tu taller")
+
+    if payload.nombre is not None:
+        tecnico.nombre = payload.nombre.strip()
+        if tecnico.usuario:
+            tecnico.usuario.nombre = tecnico.nombre
+    if payload.telefono is not None:
+        telefono = payload.telefono.strip() or None
+        tecnico.telefono = telefono
+        if tecnico.usuario:
+            tecnico.usuario.telefono = telefono
+    if payload.especialidad is not None:
+        tecnico.especialidad = _validar_especialidades_tecnico_con_taller(
+            db,
+            taller=taller,
+            especialidad_raw=payload.especialidad,
         )
-        for t in rows
-    ]
+        if tecnico.especialidad:
+            codigos = _parse_especialidades(tecnico.especialidad)
+            servicios_taller = {s.codigo: s for s in _servicios_de_taller(db, taller=taller)}
+            servicios = [servicios_taller[c] for c in codigos if c in servicios_taller]
+            _sincronizar_especialidades_tecnico(db, tecnico=tecnico, servicios=servicios)
+    if payload.estado_operativo is not None:
+        estado = payload.estado_operativo.strip().lower()
+        if estado not in ESTADOS_TECNICO_VALIDOS:
+            raise HTTPException(status_code=400, detail="estado_operativo técnico no válido")
+        tecnico.estado_operativo = estado
+    if payload.disponible is not None:
+        tecnico.disponible = bool(payload.disponible)
+
+    if tecnico.estado_operativo in {"ocupado", "en_camino", "en_proceso", "fuera_de_servicio"}:
+        tecnico.disponible = False
+    elif tecnico.estado_operativo == "disponible" and bool(tecnico.activo):
+        tecnico.disponible = True if payload.disponible is None else bool(payload.disponible)
+
+    db.add(
+        Auditoria(
+            id=uuid.uuid4(),
+            usuario_id=current_user.id,
+            accion="cu08_actualizar_tecnico",
+            modulo="talleres",
+            detalle=f"tecnico_id={tecnico.id}; estado={tecnico.estado_operativo}; disponible={tecnico.disponible}",
+        )
+    )
+    db.add(tecnico)
+    db.commit()
+    db.refresh(tecnico)
+    return _to_tecnico_out(tecnico)
+
+
+class TecnicoEspecialidadesIn(BaseModel):
+    servicio_ids: list[UUID] = Field(default_factory=list)
+
+
+@router.put("/mi-taller/tecnicos/{tecnico_id}/especialidades", response_model=TecnicoOut)
+def actualizar_especialidades_tecnico(
+    tecnico_id: str,
+    payload: TecnicoEspecialidadesIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo un taller puede editar especialidades")
+    taller = _obtener_taller_de_usuario(db, current_user)
+    codigos_legacy = _normalizar_servicios(_parse_servicios_raw(taller.servicios))
+    if codigos_legacy:
+        _sincronizar_servicios_taller(db, taller=taller, codigos_servicio=codigos_legacy)
+        db.flush()
+    tecnico = (
+        db.query(Tecnico)
+        .options(joinedload(Tecnico.tecnico_especialidades).joinedload(TecnicoEspecialidad.servicio))
+        .filter(Tecnico.id == tecnico_id, Tecnico.taller_id == taller.id)
+        .first()
+    )
+    if not tecnico:
+        raise HTTPException(status_code=404, detail="Técnico no encontrado en tu taller")
+    servicios = _validar_servicio_ids_con_taller(db, taller=taller, servicio_ids=payload.servicio_ids)
+    if not servicios:
+        raise HTTPException(status_code=400, detail="Debes enviar al menos una especialidad")
+    _sincronizar_especialidades_tecnico(db, tecnico=tecnico, servicios=servicios)
+    db.add(
+        Auditoria(
+            id=uuid.uuid4(),
+            usuario_id=current_user.id,
+            accion="cu08_actualizar_especialidades",
+            modulo="talleres",
+            detalle=f"tecnico_id={tecnico.id}; servicio_ids={[str(s.id) for s in servicios]}",
+        )
+    )
+    db.add(tecnico)
+    db.commit()
+    db.refresh(tecnico)
+    return _to_tecnico_out(tecnico)
+
+
+@router.patch("/mi-taller/tecnicos/{tecnico_id}/estado", response_model=TecnicoOut)
+def cambiar_estado_tecnico(
+    tecnico_id: str,
+    payload: TecnicoEstadoIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo un taller puede cambiar estado de técnicos")
+
+    taller = _obtener_taller_de_usuario(db, current_user)
+    tecnico = db.query(Tecnico).filter(Tecnico.id == tecnico_id, Tecnico.taller_id == taller.id).first()
+    if not tecnico:
+        raise HTTPException(status_code=404, detail="Técnico no encontrado en tu taller")
+
+    if payload.activo is not None:
+        tecnico.activo = bool(payload.activo)
+    if payload.estado_operativo is not None:
+        estado = payload.estado_operativo.strip().lower()
+        if estado not in ESTADOS_TECNICO_VALIDOS:
+            raise HTTPException(status_code=400, detail="estado_operativo técnico no válido")
+        tecnico.estado_operativo = estado
+    if payload.disponible is not None:
+        tecnico.disponible = bool(payload.disponible)
+
+    if not bool(tecnico.activo):
+        tecnico.disponible = False
+        if tecnico.estado_operativo != "fuera_de_servicio":
+            tecnico.estado_operativo = "fuera_de_servicio"
+    elif tecnico.estado_operativo in {"ocupado", "en_camino", "en_proceso", "fuera_de_servicio"}:
+        tecnico.disponible = False
+
+    db.add(
+        Auditoria(
+            id=uuid.uuid4(),
+            usuario_id=current_user.id,
+            accion="cu08_estado_tecnico",
+            modulo="talleres",
+            detalle=(
+                f"tecnico_id={tecnico.id}; activo={tecnico.activo}; "
+                f"estado={tecnico.estado_operativo}; disponible={tecnico.disponible}"
+            ),
+        )
+    )
+    db.add(tecnico)
+    db.commit()
+    db.refresh(tecnico)
+    return _to_tecnico_out(tecnico)
 
 
 @router.get("/mi-taller/tecnicos/candidatos", response_model=list[TecnicoCandidatoOut])
@@ -1173,7 +1740,7 @@ def historial_atenciones_mi_taller(
         )
         .join(Asignacion, Asignacion.solicitud_id == Solicitud.id)
         .filter(Asignacion.taller_id == taller.id)
-        .filter(Solicitud.estado.in_(["completada", "cancelada"]))
+        .filter(Solicitud.estado.in_(["completada", "finalizado", "cancelada", "cancelado"]))
         .order_by(Solicitud.actualizado_en.desc())
         .all()
     )
@@ -1242,17 +1809,20 @@ def completar_servicio(
     asig = q.order_by(Asignacion.asignado_en.desc()).first()
     if not asig:
         raise HTTPException(status_code=403, detail="No autorizado para completar esta solicitud")
-    if solicitud.estado != "en_proceso":
+    if solicitud.estado not in {"en_proceso", "atendido"}:
         raise HTTPException(
             status_code=400,
-            detail="Para completar el trabajo la solicitud debe estar en estado en_proceso",
+            detail="Para completar el trabajo la solicitud debe estar en estado en_proceso o atendido",
         )
 
     estado_anterior = solicitud.estado
-    solicitud.estado = "completada"
+    solicitud.estado = "finalizado"
     if solicitud.emergencia:
-        solicitud.emergencia.estado = "completada"
-    asig.estado = "completada"
+        solicitud.emergencia.estado = "finalizado"
+    asig.estado = "finalizado"
+    if asig.tecnico:
+        asig.tecnico.disponible = True
+        asig.tecnico.estado_operativo = "disponible"
     db.add(
         Cotizacion(
             id=uuid.uuid4(),
@@ -1269,7 +1839,7 @@ def completar_servicio(
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             estado_anterior=estado_anterior,
-            estado_nuevo=solicitud.estado,
+            estado_nuevo="finalizado",
             comentario=payload.observacion or "Trabajo completado por taller",
         )
     )
@@ -1340,7 +1910,7 @@ def listar_servicios_activos(
             joinedload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
         )
         .join(Asignacion, Asignacion.solicitud_id == Solicitud.id)
-        .filter(Solicitud.estado.in_(["asignada", "en_proceso"]))
+        .filter(Solicitud.estado.in_(["aceptada", "tecnico_asignado", "en_camino", "en_proceso", "asignada"]))
         .order_by(Solicitud.actualizado_en.desc())
     )
     if current_user.rol in {"taller", "admin"} and taller:
@@ -1380,13 +1950,16 @@ def actualizar_mi_ubicacion_tecnico(
 
     tecnico.lat_actual = payload.lat
     tecnico.lng_actual = payload.lng
+    tecnico.latitud_actual = payload.lat
+    tecnico.longitud_actual = payload.lng
+    tecnico.ultima_actualizacion_ubicacion = local_now_naive()
     db.add(tecnico)
     db.commit()
     db.refresh(tecnico)
     return {
         "ok": True,
         "tecnico_id": str(tecnico.id),
-        "lat": tecnico.lat_actual,
-        "lng": tecnico.lng_actual,
+        "lat": tecnico.latitud_actual if tecnico.latitud_actual is not None else tecnico.lat_actual,
+        "lng": tecnico.longitud_actual if tecnico.longitud_actual is not None else tecnico.lng_actual,
         "mensaje": "Ubicación actualizada",
     }

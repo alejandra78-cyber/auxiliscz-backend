@@ -202,11 +202,71 @@ def _ensure_incremental_schema() -> None:
                 )
             if "motivo_rechazo" not in cols_asig:
                 conn.execute(text("ALTER TABLE asignaciones ADD COLUMN motivo_rechazo TEXT"))
+            if "origen_asignacion" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN origen_asignacion VARCHAR(30)"))
+            if "fecha_aceptacion" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_aceptacion TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_aceptacion DATETIME")
+                )
+            if "fecha_inicio_camino" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_inicio_camino TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_inicio_camino DATETIME")
+                )
+            if "fecha_inicio_servicio" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_inicio_servicio TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_inicio_servicio DATETIME")
+                )
+            if "fecha_finalizacion" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_finalizacion TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_finalizacion DATETIME")
+                )
+            if "observacion_estado" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN observacion_estado TEXT"))
 
         if "tecnicos" in tables:
             cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}
             if "usuario_id" not in cols_tec:
                 conn.execute(text("ALTER TABLE tecnicos ADD COLUMN usuario_id UUID"))
+            if "email" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN email VARCHAR(150)"))
+            if "telefono" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN telefono VARCHAR(20)"))
+            if "especialidad" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN especialidad VARCHAR(120)"))
+            if "estado_operativo" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN estado_operativo VARCHAR(30) NOT NULL DEFAULT 'disponible'"))
+            if "activo" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN activo BOOLEAN NOT NULL DEFAULT TRUE"))
+            if "latitud_actual" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN latitud_actual DOUBLE PRECISION"))
+            if "longitud_actual" not in cols_tec:
+                conn.execute(text("ALTER TABLE tecnicos ADD COLUMN longitud_actual DOUBLE PRECISION"))
+            if "ultima_actualizacion_ubicacion" not in cols_tec:
+                conn.execute(
+                    text("ALTER TABLE tecnicos ADD COLUMN ultima_actualizacion_ubicacion TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE tecnicos ADD COLUMN ultima_actualizacion_ubicacion DATETIME")
+                )
+            if "creado_en" not in cols_tec:
+                conn.execute(
+                    text("ALTER TABLE tecnicos ADD COLUMN creado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE tecnicos ADD COLUMN creado_en DATETIME")
+                )
+            if "actualizado_en" not in cols_tec:
+                conn.execute(
+                    text("ALTER TABLE tecnicos ADD COLUMN actualizado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE tecnicos ADD COLUMN actualizado_en DATETIME")
+                )
 
         if "talleres" in tables:
             cols_taller = {c["name"] for c in inspector.get_columns("talleres")}

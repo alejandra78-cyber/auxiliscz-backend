@@ -135,8 +135,8 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         "tecnico_id": str(tecnico.id),
         "tecnico_nombre": tecnico.nombre,
         "especialidad": turno.especialidad if turno else None,
-        "lat": tecnico.lat_actual,
-        "lng": tecnico.lng_actual,
+        "lat": tecnico.latitud_actual if tecnico.latitud_actual is not None else tecnico.lat_actual,
+        "lng": tecnico.longitud_actual if tecnico.longitud_actual is not None else tecnico.lng_actual,
         "estado": str(solicitud.estado),
         "mensaje": "Ubicación de técnico obtenida",
     }

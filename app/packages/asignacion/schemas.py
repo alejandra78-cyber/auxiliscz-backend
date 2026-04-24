@@ -6,16 +6,31 @@ class AsignacionDemoOut(BaseModel):
 
 
 class BuscarCandidatosIn(BaseModel):
-    lat: float
-    lng: float
-    tipo: str
-    prioridad: int
+    lat: float | None = None
+    lng: float | None = None
+    tipo: str | None = None
+    prioridad: int | None = None
 
 
 class AsignacionOut(BaseModel):
     taller_id: str | None = None
     nombre_taller: str | None = None
     mensaje: str
+    distancia_km: float | None = None
+    puntaje: float | None = None
+    motivo_asignacion: str | None = None
+    origen_asignacion: str | None = None
+
+
+class AsignacionCandidatoOut(BaseModel):
+    taller_id: str
+    nombre: str
+    distancia_km: float
+    puntaje: float
+    capacidad_disponible: int | None = None
+    tecnicos_disponibles: int | None = None
+    estado_operativo: str | None = None
+    motivo: str | None = None
 
 
 class SolicitudServicioOut(BaseModel):
@@ -33,6 +48,7 @@ class SolicitudServicioOut(BaseModel):
     usuario_id: str
     taller_id: str | None = None
     taller_nombre: str | None = None
+    estado_asignacion: str | None = None
     tecnico_id: str | None = None
     tecnico_nombre: str | None = None
     servicio: str | None = None
@@ -42,6 +58,7 @@ class SolicitudServicioOut(BaseModel):
     distancia_km: float | None = None
     puntaje_asignacion: float | None = None
     motivo_asignacion: str | None = None
+    origen_asignacion: str | None = None
     motivo_rechazo: str | None = None
     fecha_asignacion: str | None = None
     fecha_respuesta_taller: str | None = None
@@ -78,6 +95,7 @@ class AsignarServicioIn(BaseModel):
 
 class ActualizarEstadoIn(BaseModel):
     estado: str
+    tecnico_id: str | None = None
     observacion: str | None = None
     costo: float | None = None
 

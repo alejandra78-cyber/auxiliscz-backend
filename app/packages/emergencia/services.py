@@ -231,9 +231,60 @@ async def _procesar_asignacion_automatica(
         except Exception:
             pass
 
-        # Mantener estado pendiente para respetar el flujo:
-        # pendiente -> evaluación (aprobada/rechazada) -> asignación -> ejecución.
-        db.commit()
+        # CU16: asignación inteligente automática posterior al reporte/clasificación.
+        # Se crea asignación pendiente_respuesta para que el taller la evalúe en CU15.
+        try:
+            from app.packages.asignacion.services import asignar_taller_automaticamente
+
+            await asignar_taller_automaticamente(
+                db,
+                solicitud_id=str(solicitud.id),
+                lat=lat,
+                lng=lng,
+                tipo=tipo,
+                prioridad=prioridad,
+            )
+        except HTTPException as exc:
+            if exc.status_code == 400 and "asignación activa" in (exc.detail or "").lower():
+                db.rollback()
+                return
+            db.rollback()
+            solicitud = obtener_solicitud_por_id_o_incidente(db, solicitud_id)
+            if solicitud:
+                if solicitud.incidente:
+                    solicitud.incidente.estado = "sin_taller_disponible"
+                solicitud.estado = "sin_taller_disponible"
+                if solicitud.emergencia:
+                    solicitud.emergencia.estado = "sin_taller_disponible"
+                crear_notificacion(
+                    db,
+                    usuario_id=usuario_id,
+                    solicitud_id=solicitud.id,
+                    incidente_id=solicitud.incidente_id,
+                    titulo="Sin taller disponible",
+                    mensaje="No se encontró taller disponible de forma automática. Un operador revisará el caso.",
+                    tipo="sin_taller_disponible",
+                )
+                db.commit()
+        except Exception:
+            db.rollback()
+            solicitud = obtener_solicitud_por_id_o_incidente(db, solicitud_id)
+            if solicitud:
+                if solicitud.incidente:
+                    solicitud.incidente.estado = "sin_taller_disponible"
+                solicitud.estado = "sin_taller_disponible"
+                if solicitud.emergencia:
+                    solicitud.emergencia.estado = "sin_taller_disponible"
+                crear_notificacion(
+                    db,
+                    usuario_id=usuario_id,
+                    solicitud_id=solicitud.id,
+                    incidente_id=solicitud.incidente_id,
+                    titulo="Sin taller disponible",
+                    mensaje="No se encontró taller disponible de forma automática. Un operador revisará el caso.",
+                    tipo="sin_taller_disponible",
+                )
+                db.commit()
     finally:
         db.close()
 
