@@ -230,6 +230,14 @@ def _ensure_incremental_schema() -> None:
                 )
             if "observacion_estado" not in cols_asig:
                 conn.execute(text("ALTER TABLE asignaciones ADD COLUMN observacion_estado TEXT"))
+            if "motivo_cancelacion" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN motivo_cancelacion TEXT"))
+            if "cancelado_en" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN cancelado_en TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN cancelado_en DATETIME")
+                )
 
         if "tecnicos" in tables:
             cols_tec = {c["name"] for c in inspector.get_columns("tecnicos")}
@@ -367,6 +375,20 @@ def _ensure_incremental_schema() -> None:
                 conn.execute(text("ALTER TABLE incidentes ADD COLUMN analisis_imagen TEXT"))
             if "ia_estado" not in cols_inc:
                 conn.execute(text("ALTER TABLE incidentes ADD COLUMN ia_estado VARCHAR(30) DEFAULT 'pendiente'"))
+            if "motivo_cancelacion" not in cols_inc:
+                conn.execute(text("ALTER TABLE incidentes ADD COLUMN motivo_cancelacion TEXT"))
+            if "cancelado_en" not in cols_inc:
+                conn.execute(
+                    text("ALTER TABLE incidentes ADD COLUMN cancelado_en TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE incidentes ADD COLUMN cancelado_en DATETIME")
+                )
+            if "cancelado_por" not in cols_inc:
+                conn.execute(
+                    text("ALTER TABLE incidentes ADD COLUMN cancelado_por UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE incidentes ADD COLUMN cancelado_por CHAR(36)")
+                )
 
         if "evidencias" in tables:
             cols_ev = {c["name"] for c in inspector.get_columns("evidencias")}

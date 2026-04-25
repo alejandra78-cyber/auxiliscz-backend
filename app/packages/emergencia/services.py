@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from app.ai_modules.audio import transcribir_audio
 from app.ai_modules.clasificador import clasificar_incidente
 from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
+from app.core.time import local_now_naive
 from app.models.models import Solicitud, Usuario, Vehiculo
 from app.services.notificaciones import enviar_push
 
@@ -22,6 +24,8 @@ from .repository import (
     registrar_cambio_estado,
 )
 
+logger = logging.getLogger(__name__)
+
 PRIORIDAD_POR_TIPO = {
     "choque": 1,
     "motor": 1,
@@ -32,22 +36,33 @@ PRIORIDAD_POR_TIPO = {
     "incierto": 2,
 }
 TIPOS_INCIDENTE_VALIDOS = set(PRIORIDAD_POR_TIPO.keys())
+DEFAULT_TIPO_IA = "otro"
+DEFAULT_PRIORIDAD_IA = 2
+DEFAULT_RESUMEN_IA = "No se pudo generar el diagnóstico automáticamente"
 ESTADOS_CANCELABLES = {
     "pendiente",
+    "buscando_taller",
+    "pendiente_asignacion",
     "en_revision",
     "en_evaluacion",
+    "asignado",
     "aceptada",
-    "asignada",
     "tecnico_asignado",
     "pendiente_respuesta",
+    "pendiente_respuesta_taller",
+    "en_camino",
 }
 ESTADOS_NO_CANCELABLES = {
-    "en_camino",
     "en_proceso",
+    "atendido",
+    "servicio_completado",
+    "esperando_pago",
+    "pagado",
     "completado",
     "completada",
     "finalizado",
     "cancelada",
+    "cancelado",
     "rechazada",
 }
 
@@ -203,7 +218,7 @@ async def reportar_emergencia(
     tipo_ia = tipo_normalizado
     prioridad_ia = asignar_nivel_prioridad(tipo_ia)
     confianza_ia = 0.5
-    resumen_ia = None
+    resumen_ia: str | None = None
     ia_estado = ia_estado or "pendiente"
     try:
         clasificacion_mm = await clasificar_incidente(evidencias_datos)
@@ -218,13 +233,17 @@ async def reportar_emergencia(
                 {"tipo": tipo_ia, "prioridad": prioridad_ia, "confianza": confianza_ia},
                 evidencias_datos,
             )
+            ia_estado = "procesado"
         except Exception:
-            resumen_ia = None
-        ia_estado = "procesado"
+            logger.exception("IA resumen falló para solicitud=%s", solicitud.id)
+            resumen_ia = DEFAULT_RESUMEN_IA
+            ia_estado = "fallido"
     except Exception:
-        tipo_ia = "otro"
-        prioridad_ia = 2
+        logger.exception("IA clasificación falló para solicitud=%s", solicitud.id)
+        tipo_ia = DEFAULT_TIPO_IA
+        prioridad_ia = DEFAULT_PRIORIDAD_IA
         confianza_ia = 0.0
+        resumen_ia = DEFAULT_RESUMEN_IA
         ia_estado = "fallido"
 
     # Notificación de creación al cliente
@@ -250,7 +269,7 @@ async def reportar_emergencia(
         solicitud.incidente.analisis_imagen = (
             json.dumps(analisis_imagenes, ensure_ascii=False) if analisis_imagenes else None
         )
-        solicitud.incidente.resumen_ia = resumen_ia
+        solicitud.incidente.resumen_ia = resumen_ia or DEFAULT_RESUMEN_IA
         solicitud.incidente.confianza_ia = confianza_ia
         solicitud.incidente.ia_estado = ia_estado
 
@@ -269,7 +288,7 @@ async def reportar_emergencia(
         "estado": str(solicitud.estado),
         "tipo": tipo_ia,
         "prioridad": prioridad_ia,
-        "resumen_ia": resumen_ia,
+        "resumen_ia": resumen_ia or DEFAULT_RESUMEN_IA,
         "ia_estado": ia_estado,
         "mensaje": "Emergencia registrada correctamente",
     }
@@ -307,7 +326,10 @@ async def _procesar_asignacion_automatica(
                 tipo = str(clasificacion_mm.get("tipo", tipo))
                 confianza = float(clasificacion_mm.get("confianza", confianza))
         except Exception:
+            logger.exception("IA clasificación async falló para solicitud=%s", solicitud.id)
             clasificacion_mm = None
+            tipo = DEFAULT_TIPO_IA
+            confianza = 0.0
 
         prioridad = asignar_nivel_prioridad(tipo)
         if solicitud.emergencia:
@@ -317,7 +339,7 @@ async def _procesar_asignacion_automatica(
             solicitud.incidente.tipo = tipo
             solicitud.incidente.prioridad = prioridad
             solicitud.incidente.descripcion = solicitud.emergencia.descripcion if solicitud.emergencia else solicitud.incidente.descripcion
-            solicitud.incidente.ia_estado = "procesado"
+            solicitud.incidente.ia_estado = "procesado" if clasificacion_mm else "fallido"
             solicitud.incidente.confianza_ia = confianza
         solicitud.prioridad = prioridad
         agregar_evidencia_solicitud(
@@ -350,7 +372,10 @@ async def _procesar_asignacion_automatica(
             if solicitud.incidente:
                 solicitud.incidente.resumen_ia = resumen
         except Exception:
-            pass
+            logger.exception("IA resumen async falló para solicitud=%s", solicitud.id)
+            if solicitud.incidente:
+                solicitud.incidente.resumen_ia = DEFAULT_RESUMEN_IA
+                solicitud.incidente.ia_estado = "fallido"
 
         # CU16: asignación inteligente automática posterior al reporte/clasificación.
         # Se crea asignación pendiente_respuesta para que el taller la evalúe en CU15.
@@ -480,7 +505,13 @@ async def cargar_imagen_incidente(
     return evidencia
 
 
-def cancelar_solicitud(db: Session, *, incidente_id: str, current_user: Usuario):
+def cancelar_solicitud(
+    db: Session,
+    *,
+    incidente_id: str,
+    current_user: Usuario,
+    motivo_cancelacion: str | None = None,
+):
     solicitud = obtener_solicitud_por_id_o_incidente(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
@@ -499,12 +530,54 @@ def cancelar_solicitud(db: Session, *, incidente_id: str, current_user: Usuario)
             detail=f"El estado actual '{solicitud.estado}' no permite cancelación",
         )
     estado_anterior = solicitud.estado
+    motivo = (motivo_cancelacion or "").strip() or "Cancelada por cliente"
+
+    # Cancelar asignaciones activas y liberar técnico si aplica.
+    for asig in solicitud.asignaciones:
+        estado_asig = _estado_key(asig.estado)
+        if estado_asig in {"cancelada", "cancelado", "rechazada", "finalizado", "completado", "completada"}:
+            continue
+        asig.estado = "cancelada"
+        asig.motivo_cancelacion = motivo
+        asig.cancelado_en = local_now_naive()
+        if asig.tecnico and _estado_key(asig.tecnico.estado_operativo) in {
+            "ocupado",
+            "en_camino",
+            "en_proceso",
+        }:
+            asig.tecnico.estado_operativo = "disponible"
+            asig.tecnico.disponible = True
+
+        if asig.taller and asig.taller.usuario_id:
+            crear_notificacion(
+                db,
+                usuario_id=asig.taller.usuario_id,
+                solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
+                titulo="Solicitud cancelada por cliente",
+                mensaje=f"La solicitud {solicitud.id} fue cancelada por el cliente.",
+                tipo="cancelacion",
+            )
+
     registrar_cambio_estado(
         db,
         solicitud=solicitud,
         estado_anterior=estado_anterior,
         estado_nuevo="cancelada",
-        comentario="Cancelada por usuario",
+        comentario=motivo,
+    )
+    if solicitud.incidente:
+        solicitud.incidente.motivo_cancelacion = motivo
+        solicitud.incidente.cancelado_en = local_now_naive()
+        solicitud.incidente.cancelado_por = current_user.id
+    crear_notificacion(
+        db,
+        usuario_id=current_user.id,
+        solicitud_id=solicitud.id,
+        incidente_id=solicitud.incidente_id,
+        titulo="Solicitud cancelada",
+        mensaje="Tu solicitud fue cancelada correctamente.",
+        tipo="cancelacion",
     )
     db.commit()
     db.refresh(solicitud)

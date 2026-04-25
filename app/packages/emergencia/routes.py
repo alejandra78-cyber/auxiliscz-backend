@@ -5,6 +5,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 
 from .schemas import (
+    CancelarSolicitudIn,
     CancelarSolicitudOut,
     EstadoSolicitudOut,
     ImagenIncidenteOut,
@@ -151,10 +152,16 @@ async def cargar_imagen_incidente_endpoint(
 @router.patch("/solicitud/{incidente_id}/cancelar", response_model=CancelarSolicitudOut)
 def cancelar_solicitud_endpoint(
     incidente_id: str,
+    payload: CancelarSolicitudIn | None = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    solicitud = cancelar_solicitud(db, incidente_id=incidente_id, current_user=current_user)
+    solicitud = cancelar_solicitud(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        motivo_cancelacion=(payload.motivo_cancelacion if payload else None),
+    )
     return CancelarSolicitudOut(incidente_id=str(solicitud.id), estado=str(solicitud.estado))
 
 

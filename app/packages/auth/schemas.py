@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 class RegisterIn(BaseModel):
     nombre: str = Field(..., min_length=3)
+    apellido: str | None = Field(default=None, min_length=2)
     email: EmailStr
     password: str = Field(..., min_length=6)
     telefono: str | None = None

@@ -41,9 +41,12 @@ router = APIRouter()
 
 @router.post("/register", response_model=UsuarioOut)
 def register(payload: RegisterIn, db: Session = Depends(get_db)):
+    nombre_completo = payload.nombre.strip()
+    if payload.apellido and payload.apellido.strip():
+        nombre_completo = f"{nombre_completo} {payload.apellido.strip()}"
     usuario = registrar_usuario(
         db,
-        nombre=payload.nombre,
+        nombre=nombre_completo,
         email=payload.email,
         password=payload.password,
         telefono=payload.telefono,

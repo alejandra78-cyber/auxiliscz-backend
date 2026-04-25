@@ -5,7 +5,10 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 
 from .schemas import (
+    CancelarSolicitudClienteIn,
     EstadoSolicitudClienteOut,
+    SolicitudClienteDetalleOut,
+    SolicitudClienteListItemOut,
     SolicitudSeguimientoOut,
     UbicacionTecnicoOut,
     VehiculoCreateIn,
@@ -13,12 +16,15 @@ from .schemas import (
     VehiculoUpdateIn,
 )
 from .services import (
+    cancelar_solicitud_cliente,
     consultar_estado_solicitud_cliente,
     consultar_estado_ultima_solicitud_cliente,
     desactivar_vehiculo_cliente,
     editar_vehiculo_cliente,
     listar_solicitudes_para_seguimiento,
+    listar_solicitudes_cliente,
     mis_vehiculos,
+    obtener_detalle_solicitud_cliente,
     registrar_vehiculo,
     ver_ubicacion_tecnico,
 )
@@ -141,6 +147,42 @@ def solicitudes_seguimiento_endpoint(
         )
         for s in rows
     ]
+
+
+@router.get("/solicitudes", response_model=list[SolicitudClienteListItemOut])
+def listar_solicitudes_cliente_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return listar_solicitudes_cliente(db, current_user=current_user)
+
+
+@router.get("/solicitudes/{incidente_id}", response_model=SolicitudClienteDetalleOut)
+def detalle_solicitud_cliente_endpoint(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return obtener_detalle_solicitud_cliente(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+    )
+
+
+@router.patch("/solicitudes/{incidente_id}/cancelar")
+def cancelar_solicitud_cliente_endpoint(
+    incidente_id: str,
+    payload: CancelarSolicitudClienteIn | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return cancelar_solicitud_cliente(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        motivo_cancelacion=payload.motivo_cancelacion if payload else None,
+    )
 
 
 __all__ = ["router"]

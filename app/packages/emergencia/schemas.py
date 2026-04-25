@@ -50,6 +50,10 @@ class CancelarSolicitudOut(BaseModel):
     mensaje: str = "Solicitud cancelada correctamente"
 
 
+class CancelarSolicitudIn(BaseModel):
+    motivo_cancelacion: str | None = None
+
+
 class MensajeIn(BaseModel):
     texto: str
 
