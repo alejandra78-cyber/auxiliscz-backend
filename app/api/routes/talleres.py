@@ -31,6 +31,7 @@ from app.models.models import (
     Solicitud,
     Taller,
     TallerServicio,
+    TrabajoCompletado,
     Tecnico,
     TecnicoEspecialidad,
     Turno,
@@ -231,9 +232,9 @@ class HistorialAtencionOut(BaseModel):
 
 
 class CompletarServicioIn(BaseModel):
-    costo: float = Field(..., gt=0)
-    observacion: str | None = None
-    evidencia_texto: str | None = None
+    descripcion_trabajo: str = Field(..., min_length=3, max_length=4000)
+    observacion: str | None = Field(default=None, max_length=2000)
+    evidencia_url: str | None = Field(default=None, max_length=500)
 
 
 class ServicioActivoOut(BaseModel):
@@ -1814,21 +1815,38 @@ def completar_servicio(
         )
 
     estado_anterior = solicitud.estado
-    solicitud.estado = "finalizado"
+    solicitud.estado = "trabajo_completado"
     if solicitud.emergencia:
-        solicitud.emergencia.estado = "finalizado"
-    asig.estado = "finalizado"
+        solicitud.emergencia.estado = "trabajo_completado"
+    if solicitud.incidente:
+        solicitud.incidente.estado = "trabajo_completado"
+    asig.estado = "atendido"
+    asig.fecha_finalizacion = local_now_naive()
     if asig.tecnico:
         asig.tecnico.disponible = True
         asig.tecnico.estado_operativo = "disponible"
+    trabajo = TrabajoCompletado(
+        id=uuid.uuid4(),
+        solicitud_id=solicitud.id,
+        incidente_id=solicitud.incidente_id,
+        asignacion_id=asig.id,
+        taller_id=asig.taller_id,
+        tecnico_id=asig.tecnico_id,
+        descripcion=payload.descripcion_trabajo.strip(),
+        observaciones=(payload.observacion or "").strip() or None,
+        evidencia_url=(payload.evidencia_url or "").strip() or None,
+        registrado_por_usuario_id=current_user.id,
+        creado_en=local_now_naive(),
+    )
+    db.add(trabajo)
     db.add(
-        Cotizacion(
+        Historial(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
-            monto=payload.costo,
-            detalle="Trabajo completado por taller",
-            estado="completada",
+            estado_anterior=estado_anterior,
+            estado_nuevo="trabajo_completado",
+            comentario=payload.observacion or "Trabajo completado por taller",
         )
     )
     db.add(
@@ -1836,22 +1854,16 @@ def completar_servicio(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
-            estado_anterior=estado_anterior,
-            estado_nuevo="finalizado",
-            comentario=payload.observacion or "Trabajo completado por taller",
+            estado_anterior="trabajo_completado",
+            estado_nuevo="esperando_pago",
+            comentario="Trabajo completado. Se habilita CU22 para procesar pago",
         )
     )
-    if payload.evidencia_texto:
-        db.add(
-            Historial(
-                id=uuid.uuid4(),
-                solicitud_id=solicitud.id,
-                incidente_id=solicitud.incidente_id,
-                estado_anterior=solicitud.estado,
-                estado_nuevo=solicitud.estado,
-                comentario=f"Evidencia final: {payload.evidencia_texto}",
-            )
-        )
+    solicitud.estado = "esperando_pago"
+    if solicitud.emergencia:
+        solicitud.emergencia.estado = "esperando_pago"
+    if solicitud.incidente:
+        solicitud.incidente.estado = "esperando_pago"
     if solicitud.cliente:
         db.add(
             Historial(
@@ -1872,7 +1884,7 @@ def completar_servicio(
                 solicitud_id=solicitud.id,
                 incidente_id=solicitud.incidente_id,
                 titulo="Servicio completado",
-                mensaje=f"Tu solicitud SOL-{str(solicitud.id).split('-')[0].upper()} fue completada",
+                mensaje=f"Tu solicitud SOL-{str(solicitud.id).split('-')[0].upper()} fue completada. Ahora puedes procesar el pago.",
                 tipo="trabajo_completado",
                 estado="no_leida",
             )
@@ -1882,10 +1894,10 @@ def completar_servicio(
     return {
         "ok": True,
         "incidente_id": str(solicitud.id),
+        "codigo_trabajo": f"TRB-{str(trabajo.id).split('-')[0].upper()}",
         "estado_anterior": estado_anterior,
         "estado_nuevo": solicitud.estado,
-        "costo_total": payload.costo,
-        "comision": round(payload.costo * 0.1, 2),
+        "descripcion_trabajo": trabajo.descripcion,
     }
 
 

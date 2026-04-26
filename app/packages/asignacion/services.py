@@ -64,6 +64,8 @@ ESTADOS_CU17_VALIDOS = {
     "aceptada",
     "tecnico_asignado",
     "en_camino",
+    "en_diagnostico",
+    "diagnostico_completado",
     "en_proceso",
     "atendido",
     "finalizado",
@@ -78,14 +80,24 @@ TRANSICIONES_CU17: dict[str, set[str]] = {
     "pendiente_respuesta": {"aceptada"},
     "aceptada": {"tecnico_asignado", "cancelado"},
     "tecnico_asignado": {"en_camino", "cancelado"},
-    "en_camino": {"en_proceso", "cancelado"},
+    # Compatibilidad: permite ir directo a en_proceso o pasar por diagnóstico.
+    "en_camino": {"en_diagnostico", "en_proceso", "cancelado"},
+    "en_diagnostico": {"diagnostico_completado", "cancelado"},
+    "diagnostico_completado": {"en_proceso", "cancelado"},
     "en_proceso": {"atendido", "cancelado"},
     "atendido": {"finalizado"},
     "finalizado": set(),
     "cancelado": set(),
 }
 
-ESTADOS_ASIGNACION_ACTIVA_CU17 = {"aceptada", "tecnico_asignado", "en_camino", "en_proceso"}
+ESTADOS_ASIGNACION_ACTIVA_CU17 = {
+    "aceptada",
+    "tecnico_asignado",
+    "en_camino",
+    "en_diagnostico",
+    "diagnostico_completado",
+    "en_proceso",
+}
 
 
 def codigo_solicitud(solicitud: Solicitud) -> str:
@@ -1108,7 +1120,7 @@ def actualizar_estado_servicio(
         tecnico_obj.disponible = False
         tecnico_obj.estado_operativo = "ocupado"
 
-    if estado_nuevo in {"en_camino", "en_proceso"} and not asig_actual.tecnico_id:
+    if estado_nuevo in {"en_camino", "en_diagnostico", "en_proceso"} and not asig_actual.tecnico_id:
         raise HTTPException(status_code=400, detail=f"Para {estado_nuevo} debes tener técnico asignado")
 
     ahora = local_now_naive()
@@ -1116,6 +1128,11 @@ def actualizar_estado_servicio(
         asig_actual.fecha_inicio_camino = asig_actual.fecha_inicio_camino or ahora
         if asig_actual.tecnico:
             asig_actual.tecnico.estado_operativo = "en_camino"
+            asig_actual.tecnico.disponible = False
+    if estado_nuevo == "en_diagnostico":
+        asig_actual.fecha_inicio_servicio = asig_actual.fecha_inicio_servicio or ahora
+        if asig_actual.tecnico:
+            asig_actual.tecnico.estado_operativo = "en_proceso"
             asig_actual.tecnico.disponible = False
     if estado_nuevo == "en_proceso":
         asig_actual.fecha_inicio_servicio = asig_actual.fecha_inicio_servicio or ahora

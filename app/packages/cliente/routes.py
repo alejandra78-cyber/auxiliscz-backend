@@ -6,7 +6,10 @@ from app.core.security import get_current_user
 
 from .schemas import (
     CancelarSolicitudClienteIn,
+    EvaluarServicioIn,
+    EvaluarServicioOut,
     EstadoSolicitudClienteOut,
+    HistorialServicioItemOut,
     SolicitudClienteDetalleOut,
     SolicitudClienteListItemOut,
     SolicitudSeguimientoOut,
@@ -20,7 +23,9 @@ from .services import (
     consultar_estado_solicitud_cliente,
     consultar_estado_ultima_solicitud_cliente,
     desactivar_vehiculo_cliente,
+    evaluar_servicio_cliente,
     editar_vehiculo_cliente,
+    historial_servicios_cliente,
     listar_solicitudes_para_seguimiento,
     listar_solicitudes_cliente,
     mis_vehiculos,
@@ -183,6 +188,30 @@ def cancelar_solicitud_cliente_endpoint(
         current_user=current_user,
         motivo_cancelacion=payload.motivo_cancelacion if payload else None,
     )
+
+
+@router.post("/solicitudes/{incidente_id}/evaluar", response_model=EvaluarServicioOut)
+def evaluar_servicio_cliente_endpoint(
+    incidente_id: str,
+    payload: EvaluarServicioIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return evaluar_servicio_cliente(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        calificacion=payload.calificacion,
+        comentario=payload.comentario,
+    )
+
+
+@router.get("/historial-servicios", response_model=list[HistorialServicioItemOut])
+def historial_servicios_cliente_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return historial_servicios_cliente(db, current_user=current_user)
 
 
 __all__ = ["router"]

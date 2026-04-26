@@ -732,6 +732,7 @@ app.include_router(taller_router,      prefix="/api/talleres",    tags=["Taller 
 app.include_router(emergencia_router,  prefix="/api/emergencia",  tags=["Emergencia"])
 app.include_router(emergencia_router,  prefix="/api/emergencias", tags=["Emergencia (Compat)"])
 app.include_router(asignacion_router,  prefix="/api/asignacion",  tags=["Asignación"])
+app.include_router(asignacion_router,  prefix="/api/asignaciones", tags=["Asignación (Compat)"])
 app.include_router(pagos_router,       prefix="/api/pagos",       tags=["Pagos"])
 app.include_router(admin_router,       prefix="/api/admin",       tags=["Admin"])
 

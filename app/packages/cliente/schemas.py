@@ -74,6 +74,7 @@ class SolicitudAccionesOut(BaseModel):
     puede_cancelar: bool = False
     puede_ver_tecnico: bool = False
     puede_ver_cotizacion: bool = False
+    puede_responder_cotizacion: bool = False
     puede_pagar: bool = False
     puede_evaluar_servicio: bool = False
 
@@ -116,6 +117,9 @@ class CotizacionActualOut(BaseModel):
     monto: float
     estado: str
     detalle: str | None = None
+    observaciones: str | None = None
+    validez_hasta: str | None = None
+    fecha_respuesta_cliente: str | None = None
     creado_en: str | None = None
 
 
@@ -155,3 +159,32 @@ class SolicitudClienteDetalleOut(BaseModel):
     cotizacion_actual: CotizacionActualOut | None = None
     pago_actual: PagoActualOut | None = None
     acciones_disponibles: SolicitudAccionesOut
+
+
+class EvaluarServicioIn(BaseModel):
+    calificacion: int = Field(..., ge=1, le=5)
+    comentario: str | None = Field(default=None, max_length=1000)
+
+
+class EvaluarServicioOut(BaseModel):
+    incidente_id: str
+    codigo_solicitud: str
+    calificacion: int
+    comentario: str | None = None
+    creado_en: str | None = None
+    mensaje: str
+
+
+class HistorialServicioItemOut(BaseModel):
+    incidente_id: str
+    codigo_solicitud: str
+    estado_final: str
+    fecha: str | None = None
+    vehiculo: SolicitudVehiculoOut | None = None
+    tipo_problema: str | None = None
+    taller: SolicitudTallerOut | None = None
+    tecnico: SolicitudTecnicoOut | None = None
+    resumen_ia: str | None = None
+    trabajo_realizado: str | None = None
+    monto_pagado: float | None = None
+    evaluacion: dict | None = None

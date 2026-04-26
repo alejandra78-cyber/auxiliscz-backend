@@ -302,6 +302,7 @@ class Solicitud(Base):
     evidencias = relationship("SolicitudEvidencia", back_populates="solicitud")
     notificaciones = relationship("Notificacion", back_populates="solicitud")
     mensajes = relationship("Mensaje", back_populates="solicitud")
+    trabajos_completados = relationship("TrabajoCompletado", back_populates="solicitud")
 
 
 class Emergencia(Base):
@@ -364,6 +365,7 @@ class Asignacion(Base):
     incidente = relationship("Incidente", back_populates="asignaciones")
     taller = relationship("Taller", back_populates="asignaciones")
     tecnico = relationship("Tecnico", back_populates="asignaciones")
+    trabajos_completados = relationship("TrabajoCompletado", back_populates="asignacion")
 
 
 class Disponibilidad(Base):
@@ -406,6 +408,29 @@ class Evaluacion(Base):
     solicitud = relationship("Solicitud", back_populates="evaluaciones")
 
 
+class TrabajoCompletado(Base):
+    __tablename__ = "trabajos_completados"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False, index=True)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True, index=True)
+    asignacion_id = Column(GUID(), ForeignKey("asignaciones.id"), nullable=True, index=True)
+    taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True, index=True)
+    tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True, index=True)
+    descripcion = Column(Text, nullable=False)
+    observaciones = Column(Text)
+    evidencia_url = Column(String(500))
+    registrado_por_usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=True, index=True)
+    creado_en = Column(DateTime, default=local_now_naive, nullable=False)
+
+    solicitud = relationship("Solicitud", back_populates="trabajos_completados")
+    incidente = relationship("Incidente")
+    asignacion = relationship("Asignacion", back_populates="trabajos_completados")
+    taller = relationship("Taller")
+    tecnico = relationship("Tecnico")
+    registrado_por = relationship("Usuario")
+
+
 class Pago(Base):
     __tablename__ = "pagos"
 
@@ -413,11 +438,23 @@ class Pago(Base):
     monto = Column(Float, nullable=False)
     estado = Column(String(50), default="pendiente")
     metodo = Column(String(50))
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
+    cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=True)
+    taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True)
+    comprobante_url = Column(String(500))
+    referencia = Column(String(120))
     pagado_en = Column(DateTime)
+    fecha_verificacion = Column(DateTime)
+    verificado_por = Column(GUID(), ForeignKey("usuarios.id"), nullable=True)
     comision_plataforma = Column(Float)
+    monto_taller = Column(Float)
 
     cotizaciones = relationship("Cotizacion", back_populates="pago")
     comision_detalle = relationship("Comision", back_populates="pago", uselist=False)
+    incidente = relationship("Incidente")
+    cliente = relationship("Cliente")
+    taller = relationship("Taller")
+    verificador = relationship("Usuario")
 
 
 class Cotizacion(Base):
@@ -426,14 +463,25 @@ class Cotizacion(Base):
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
+    asignacion_id = Column(GUID(), ForeignKey("asignaciones.id"), nullable=True)
+    taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True)
+    cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=True)
     pago_id = Column(GUID(), ForeignKey("pagos.id"), unique=True, nullable=True)
     monto = Column(Float, nullable=False)
     detalle = Column(Text)
+    observaciones = Column(Text)
     estado = Column(String(50), default="pendiente")
+    fecha_emision = Column(DateTime, default=local_now_naive)
+    validez_hasta = Column(DateTime)
+    fecha_respuesta_cliente = Column(DateTime)
     creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="cotizaciones")
     incidente = relationship("Incidente", back_populates="cotizaciones")
+    asignacion = relationship("Asignacion")
+    taller = relationship("Taller")
+    cliente = relationship("Cliente")
     pago = relationship("Pago", back_populates="cotizaciones")
 
 

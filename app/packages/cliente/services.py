@@ -1,7 +1,9 @@
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models.models import Cliente, Pago, Solicitud, Turno, Usuario
+import uuid
+
+from app.models.models import Cliente, Evaluacion, Pago, Solicitud, TrabajoCompletado, Turno, Usuario
 from app.packages.emergencia.services import cancelar_solicitud as cancelar_solicitud_emergencia
 
 CANCELABLE_STATES = {
@@ -15,6 +17,8 @@ CANCELABLE_STATES = {
     "tecnico_asignado",
     "en_camino",
 }
+
+EVALUABLE_STATES = {"finalizado", "pagado", "servicio_completado", "completada", "completado"}
 
 from .repository import (
     actualizar_vehiculo,
@@ -251,8 +255,10 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
 
     cotizacion = solicitud.cotizaciones[-1] if solicitud.cotizaciones else None
     pago = cotizacion.pago if cotizacion and cotizacion.pago else None
+    estado_cot = _estado_key(cotizacion.estado) if cotizacion else ""
 
     puede_ver_cotizacion = cotizacion is not None
+    puede_responder_cotizacion = bool(cotizacion and estado_cot in {"emitida", "pendiente", "enviada"})
     puede_pagar = bool(cotizacion and (pago is None or _estado_key(pago.estado) in {"pendiente", "pendiente_pago"}))
     puede_evaluar = estado_key in {"finalizado", "servicio_completado", "pagado"}
 
@@ -260,6 +266,7 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
         "puede_cancelar": estado_key in CANCELABLE_STATES,
         "puede_ver_tecnico": tiene_tecnico and estado_key in {"tecnico_asignado", "en_camino", "en_proceso"},
         "puede_ver_cotizacion": puede_ver_cotizacion,
+        "puede_responder_cotizacion": puede_responder_cotizacion,
         "puede_pagar": puede_pagar,
         "puede_evaluar_servicio": puede_evaluar,
     }
@@ -324,6 +331,11 @@ def _serializar_cotizacion_pago(solicitud: Solicitud) -> tuple[dict | None, dict
         "monto": cotizacion.monto,
         "estado": cotizacion.estado,
         "detalle": cotizacion.detalle,
+        "observaciones": cotizacion.observaciones,
+        "validez_hasta": cotizacion.validez_hasta.isoformat() if cotizacion.validez_hasta else None,
+        "fecha_respuesta_cliente": (
+            cotizacion.fecha_respuesta_cliente.isoformat() if cotizacion.fecha_respuesta_cliente else None
+        ),
         "creado_en": cotizacion.creado_en.isoformat() if cotizacion.creado_en else None,
     }
     pago: Pago | None = cotizacion.pago
@@ -424,3 +436,84 @@ def cancelar_solicitud_cliente(
         "estado": str(solicitud.estado),
         "mensaje": "Solicitud cancelada correctamente",
     }
+
+
+def evaluar_servicio_cliente(
+    db: Session,
+    *,
+    incidente_id: str,
+    current_user: Usuario,
+    calificacion: int,
+    comentario: str | None,
+) -> dict:
+    _validar_identidad_cliente(current_user)
+    solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
+    estado_key = _estado_key(solicitud.estado)
+    if estado_key not in EVALUABLE_STATES:
+        raise HTTPException(status_code=400, detail="Solo puedes evaluar servicios finalizados/pagados")
+
+    existente = db.query(Evaluacion).filter(Evaluacion.solicitud_id == solicitud.id).first()
+    if existente:
+        raise HTTPException(status_code=409, detail="Esta solicitud ya tiene una evaluación registrada")
+
+    row = Evaluacion(
+        id=uuid.uuid4(),
+        solicitud_id=solicitud.id,
+        estrellas=int(calificacion),
+        comentario=(comentario or "").strip() or None,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {
+        "incidente_id": str(solicitud.id),
+        "codigo_solicitud": _codigo_solicitud(solicitud),
+        "calificacion": row.estrellas,
+        "comentario": row.comentario,
+        "creado_en": row.creado_en.isoformat() if row.creado_en else None,
+        "mensaje": "Evaluación registrada correctamente",
+    }
+
+
+def historial_servicios_cliente(db: Session, *, current_user: Usuario) -> list[dict]:
+    _validar_identidad_cliente(current_user)
+    rows = (
+        db.query(Solicitud)
+        .join(Cliente, Solicitud.cliente_id == Cliente.id)
+        .filter(Cliente.usuario_id == current_user.id)
+        .filter(Solicitud.estado.in_(["finalizado", "pagado", "servicio_completado", "cancelado", "cancelada"]))
+        .order_by(Solicitud.actualizado_en.desc().nullslast(), Solicitud.creado_en.desc())
+        .all()
+    )
+    out: list[dict] = []
+    for s in rows:
+        taller, tecnico = _serializar_taller_tecnico(s)
+        vehiculo = _serializar_vehiculo(s)
+        cot, pago = _serializar_cotizacion_pago(s)
+        evaluacion = s.evaluaciones[-1] if s.evaluaciones else None
+        trabajo = s.trabajos_completados[-1] if getattr(s, "trabajos_completados", None) else None
+        out.append(
+            {
+                "incidente_id": str(s.id),
+                "codigo_solicitud": _codigo_solicitud(s),
+                "estado_final": str(s.estado),
+                "fecha": s.actualizado_en.isoformat() if s.actualizado_en else (s.creado_en.isoformat() if s.creado_en else None),
+                "vehiculo": vehiculo,
+                "tipo_problema": str(s.emergencia.tipo) if s.emergencia and s.emergencia.tipo else (s.incidente.tipo if s.incidente else None),
+                "taller": taller,
+                "tecnico": tecnico,
+                "resumen_ia": _resolver_resumen_ia(s),
+                "trabajo_realizado": trabajo.descripcion if trabajo else None,
+                "monto_pagado": (pago.get("monto") if pago else (cot.get("monto") if cot else None)),
+                "evaluacion": (
+                    {
+                        "calificacion": evaluacion.estrellas,
+                        "comentario": evaluacion.comentario,
+                        "creado_en": evaluacion.creado_en.isoformat() if evaluacion.creado_en else None,
+                    }
+                    if evaluacion
+                    else None
+                ),
+            }
+        )
+    return out
