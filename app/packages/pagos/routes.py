@@ -1,21 +1,21 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from app.core.database import get_db
-from app.core.security import get_current_user
+from fastapi import APIRouter
+from pydantic import BaseModel
 
 router = APIRouter()
 
+
+class PagoRequest(BaseModel):
+    solicitud_id: str
+    metodo: str
+
+
 @router.post("/procesar")
-def procesar_pago(
-    solicitud_id: str,
-    metodo: str,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
+def procesar_pago(payload: PagoRequest):
     return {
-        "pago_id": "PAGO123",
+        "pago_id": "PAGO-DEMO-001",
+        "solicitud_id": payload.solicitud_id,
         "estado": "completado",
-        "metodo": metodo,
-        "solicitud_id": solicitud_id,
-        "monto": 100
+        "metodo": payload.metodo,
+        "monto": 100,
+        "mensaje": "Pago procesado correctamente",
     }

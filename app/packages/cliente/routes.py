@@ -4,7 +4,17 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_user
 
-from .schemas import EstadoSolicitudClienteOut, SolicitudSeguimientoOut, UbicacionTecnicoOut, VehiculoCreateIn, VehiculoOut
+from .schemas import (
+    EstadoSolicitudClienteOut,
+    EvaluacionCreateIn,
+    EvaluacionOut,
+    HistorialServicioOut,
+    SolicitudSeguimientoOut,
+    UbicacionTecnicoOut,
+    VehiculoCreateIn,
+    VehiculoOut,
+)
+
 from .services import (
     consultar_estado_solicitud_cliente,
     consultar_estado_ultima_solicitud_cliente,
@@ -12,6 +22,8 @@ from .services import (
     mis_vehiculos,
     registrar_vehiculo,
     ver_ubicacion_tecnico,
+    evaluar_servicio_cliente,
+    listar_historial_servicios_cliente,
 )
 
 router = APIRouter()
@@ -102,5 +114,35 @@ def solicitudes_seguimiento_endpoint(
         for s in rows
     ]
 
+@router.post("/solicitudes/{incidente_id}/evaluar", response_model=EvaluacionOut)
+def evaluar_servicio_endpoint(
+    incidente_id: str,
+    payload: EvaluacionCreateIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    evaluacion = evaluar_servicio_cliente(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        estrellas=payload.estrellas,
+        comentario=payload.comentario,
+    )
+    return EvaluacionOut(
+        evaluacion_id=str(evaluacion.id),
+        incidente_id=incidente_id,
+        codigo_solicitud=f"SOL-{incidente_id.split('-')[0].upper()}",
+        estrellas=evaluacion.estrellas,
+        comentario=evaluacion.comentario,
+        mensaje="Servicio evaluado correctamente",
+    )
+
+
+@router.get("/servicios/historial", response_model=list[HistorialServicioOut])
+def historial_servicios_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return listar_historial_servicios_cliente(db, current_user=current_user)
 
 __all__ = ["router"]

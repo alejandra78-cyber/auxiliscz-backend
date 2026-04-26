@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models.models import Cliente, Solicitud, Turno, Usuario
+from app.models.models import Cliente, Evaluacion, Pago, Solicitud, Turno, Usuario
 
 from .repository import crear_vehiculo, get_vehiculo_by_placa, listar_vehiculos_de_usuario
 
@@ -140,3 +140,91 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         "estado": str(solicitud.estado),
         "mensaje": "Ubicación de técnico obtenida",
     }
+
+def evaluar_servicio_cliente(
+    db: Session,
+    *,
+    incidente_id: str,
+    current_user: Usuario,
+    estrellas: int,
+    comentario: str | None,
+) -> Evaluacion:
+    solicitud = consultar_estado_solicitud_cliente(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+    )
+
+    if solicitud.estado not in {"completado", "pagado", "finalizado"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Solo puedes evaluar servicios completados o pagados",
+        )
+
+    existente = (
+        db.query(Evaluacion)
+        .filter(Evaluacion.solicitud_id == solicitud.id)
+        .first()
+    )
+
+    if existente:
+        raise HTTPException(status_code=400, detail="Ya evaluaste este servicio")
+
+    evaluacion = Evaluacion(
+        solicitud_id=solicitud.id,
+        estrellas=estrellas,
+        comentario=comentario,
+    )
+
+    db.add(evaluacion)
+    db.commit()
+    db.refresh(evaluacion)
+    return evaluacion
+
+
+def listar_historial_servicios_cliente(db: Session, *, current_user: Usuario) -> list[dict]:
+    solicitudes = (
+        db.query(Solicitud)
+        .join(Cliente, Solicitud.cliente_id == Cliente.id)
+        .filter(Cliente.usuario_id == current_user.id)
+        .order_by(Solicitud.creado_en.desc())
+        .all()
+    )
+
+    historial = []
+
+    for solicitud in solicitudes:
+        asignacion = solicitud.asignaciones[-1] if solicitud.asignaciones else None
+        evaluacion = solicitud.evaluaciones[-1] if solicitud.evaluaciones else None
+        cotizacion = solicitud.cotizaciones[-1] if solicitud.cotizaciones else None
+        pago = None
+
+        if cotizacion and cotizacion.pago_id:
+            pago = db.query(Pago).filter(Pago.id == cotizacion.pago_id).first()
+
+        vehiculo_nombre = None
+        if solicitud.vehiculo:
+            partes = [solicitud.vehiculo.marca, solicitud.vehiculo.modelo]
+            vehiculo_nombre = " ".join([p for p in partes if p]) or None
+
+        historial.append(
+            {
+                "incidente_id": str(solicitud.id),
+                "codigo_solicitud": _codigo_solicitud(solicitud),
+                "estado": str(solicitud.estado),
+                "tipo": str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
+                "prioridad": solicitud.prioridad,
+                "vehiculo_placa": solicitud.vehiculo.placa if solicitud.vehiculo else None,
+                "vehiculo": vehiculo_nombre,
+                "taller_nombre": asignacion.taller.nombre if asignacion and asignacion.taller else None,
+                "tecnico_nombre": asignacion.tecnico.nombre if asignacion and asignacion.tecnico else None,
+                "monto_pagado": float(pago.monto) if pago else None,
+                "pago_estado": pago.estado if pago else None,
+                "calificacion": evaluacion.estrellas if evaluacion else None,
+                "comentario_evaluacion": evaluacion.comentario if evaluacion else None,
+                "creado_en": solicitud.creado_en,
+                "actualizado_en": solicitud.actualizado_en,
+            }
+        )
+
+    return historial
