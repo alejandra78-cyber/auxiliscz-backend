@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 import uuid
 
-from app.models.models import Cliente, Evaluacion, Pago, Solicitud, TrabajoCompletado, Turno, Usuario
+from app.models.models import Asignacion, Cliente, Evaluacion, Pago, Solicitud, TrabajoCompletado, Ubicacion, Usuario
 from app.packages.emergencia.services import cancelar_solicitud as cancelar_solicitud_emergencia
 
 CANCELABLE_STATES = {
@@ -187,62 +187,102 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     if (not solicitud.cliente or str(solicitud.cliente.usuario_id) != str(current_user.id)) and current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
-    if solicitud.estado not in {"asignada", "en_proceso"}:
-        return {
-            "incidente_id": str(solicitud.id),
-            "codigo_solicitud": _codigo_solicitud(solicitud),
-            "tecnico_id": None,
-            "tecnico_nombre": None,
-            "especialidad": None,
-            "lat": None,
-            "lng": None,
-            "estado": str(solicitud.estado),
-            "mensaje": "La ubicación solo está disponible cuando el servicio está asignado o en proceso",
-        }
-
     if not solicitud.asignaciones:
         return {
             "incidente_id": str(solicitud.id),
             "codigo_solicitud": _codigo_solicitud(solicitud),
-            "tecnico_id": None,
             "tecnico_nombre": None,
-            "especialidad": None,
-            "lat": None,
-            "lng": None,
-            "estado": str(solicitud.estado),
+            "estado_servicio": str(solicitud.estado),
+            "latitud_tecnico": None,
+            "longitud_tecnico": None,
+            "latitud_cliente": None,
+            "longitud_cliente": None,
+            "ultima_actualizacion": None,
             "mensaje": "Aún no hay técnico asignado",
         }
-    asig = solicitud.asignaciones[-1]
-    tecnico = asig.tecnico
 
-    if not tecnico:
+    asignacion = (
+        db.query(Asignacion)
+        .filter(Asignacion.solicitud_id == solicitud.id)
+        .order_by(Asignacion.fecha_asignacion.desc().nullslast(), Asignacion.asignado_en.desc().nullslast())
+        .first()
+    )
+    if not asignacion or not asignacion.tecnico:
         return {
             "incidente_id": str(solicitud.id),
             "codigo_solicitud": _codigo_solicitud(solicitud),
-            "tecnico_id": None,
             "tecnico_nombre": None,
-            "especialidad": None,
-            "lat": None,
-            "lng": None,
-            "estado": str(solicitud.estado),
+            "estado_servicio": str(asignacion.estado if asignacion else solicitud.estado),
+            "latitud_tecnico": None,
+            "longitud_tecnico": None,
+            "latitud_cliente": None,
+            "longitud_cliente": None,
+            "ultima_actualizacion": None,
             "mensaje": "Aún no hay técnico asignado",
         }
-    turno = (
-        db.query(Turno)
-        .filter(Turno.tecnico_id == tecnico.id)
-        .order_by(Turno.inicio.desc())
+
+    estado_servicio = _estado_key(asignacion.estado or solicitud.estado)
+    if estado_servicio not in {"tecnico_asignado", "en_camino", "en_proceso"}:
+        return {
+            "incidente_id": str(solicitud.id),
+            "codigo_solicitud": _codigo_solicitud(solicitud),
+            "tecnico_nombre": asignacion.tecnico.nombre,
+            "estado_servicio": str(asignacion.estado or solicitud.estado),
+            "latitud_tecnico": None,
+            "longitud_tecnico": None,
+            "latitud_cliente": None,
+            "longitud_cliente": None,
+            "ultima_actualizacion": None,
+            "mensaje": "El técnico aún no inició el seguimiento.",
+        }
+
+    ultima_ubicacion = (
+        db.query(Ubicacion)
+        .filter(Ubicacion.tecnico_id == asignacion.tecnico_id)
+        .filter(Ubicacion.asignacion_id == asignacion.id)
+        .order_by(Ubicacion.registrado_en.desc())
         .first()
     )
+    if not ultima_ubicacion:
+        ultima_ubicacion = (
+            db.query(Ubicacion)
+            .filter(Ubicacion.tecnico_id == asignacion.tecnico_id)
+            .filter(Ubicacion.incidente_id == solicitud.incidente_id)
+            .order_by(Ubicacion.registrado_en.desc())
+            .first()
+        )
+
+    lat_cliente = None
+    lng_cliente = None
+    if solicitud.incidente and solicitud.incidente.latitud is not None and solicitud.incidente.longitud is not None:
+        lat_cliente = solicitud.incidente.latitud
+        lng_cliente = solicitud.incidente.longitud
+    elif solicitud.emergencia and solicitud.emergencia.ubicaciones:
+        ubic = sorted(
+            solicitud.emergencia.ubicaciones,
+            key=lambda x: x.registrado_en or x.id,
+            reverse=True,
+        )[0]
+        lat_cliente = ubic.latitud
+        lng_cliente = ubic.longitud
+
     return {
         "incidente_id": str(solicitud.id),
         "codigo_solicitud": _codigo_solicitud(solicitud),
-        "tecnico_id": str(tecnico.id),
-        "tecnico_nombre": tecnico.nombre,
-        "especialidad": turno.especialidad if turno else None,
-        "lat": tecnico.latitud_actual if tecnico.latitud_actual is not None else tecnico.lat_actual,
-        "lng": tecnico.longitud_actual if tecnico.longitud_actual is not None else tecnico.lng_actual,
-        "estado": str(solicitud.estado),
-        "mensaje": "Ubicación de técnico obtenida",
+        "tecnico_nombre": asignacion.tecnico.nombre,
+        "estado_servicio": str(asignacion.estado or solicitud.estado),
+        "latitud_tecnico": ultima_ubicacion.latitud if ultima_ubicacion else None,
+        "longitud_tecnico": ultima_ubicacion.longitud if ultima_ubicacion else None,
+        "latitud_cliente": lat_cliente,
+        "longitud_cliente": lng_cliente,
+        "ultima_actualizacion": (
+            ultima_ubicacion.registrado_en.isoformat() if ultima_ubicacion and ultima_ubicacion.registrado_en else None
+        ),
+        "mensaje": (
+            "Ubicación del técnico obtenida"
+            if ultima_ubicacion
+            else "El técnico aún no inició el seguimiento."
+        ),
     }
 
 

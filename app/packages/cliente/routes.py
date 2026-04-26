@@ -127,8 +127,17 @@ def estado_solicitud_cliente_endpoint(
     )
 
 
-@router.get("/solicitudes/{incidente_id}/tecnico-ubicacion", response_model=UbicacionTecnicoOut)
+@router.get("/solicitudes/{incidente_id}/ubicacion-tecnico", response_model=UbicacionTecnicoOut)
 def ubicacion_tecnico_endpoint(
+    incidente_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return ver_ubicacion_tecnico(db, incidente_id=incidente_id, current_user=current_user)
+
+
+@router.get("/solicitudes/{incidente_id}/tecnico-ubicacion", response_model=UbicacionTecnicoOut)
+def ubicacion_tecnico_legacy_endpoint(
     incidente_id: str,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),

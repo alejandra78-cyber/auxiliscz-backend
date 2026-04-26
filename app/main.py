@@ -14,6 +14,7 @@ from .packages.emergencia.routes import router as emergencia_router
 from .packages.auth.routes import router as auth_router
 from .packages.pagos.routes import router as pagos_router
 from .packages.taller.routes import router as taller_router
+from .packages.tecnico.routes import router as tecnico_router
 from .core.database import engine, Base
 
 
@@ -451,6 +452,29 @@ def _ensure_incremental_schema() -> None:
                     )
                 )
 
+        if "ubicaciones" in tables:
+            cols_ubic = {c["name"] for c in inspector.get_columns("ubicaciones")}
+            if "tecnico_id" not in cols_ubic:
+                conn.execute(
+                    text("ALTER TABLE ubicaciones ADD COLUMN tecnico_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE ubicaciones ADD COLUMN tecnico_id CHAR(36)")
+                )
+            if "asignacion_id" not in cols_ubic:
+                conn.execute(
+                    text("ALTER TABLE ubicaciones ADD COLUMN asignacion_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE ubicaciones ADD COLUMN asignacion_id CHAR(36)")
+                )
+            if "incidente_id" not in cols_ubic:
+                conn.execute(
+                    text("ALTER TABLE ubicaciones ADD COLUMN incidente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE ubicaciones ADD COLUMN incidente_id CHAR(36)")
+                )
+            if "tipo" not in cols_ubic:
+                conn.execute(text("ALTER TABLE ubicaciones ADD COLUMN tipo VARCHAR(30)"))
+
         fk_targets = [
             ("solicitudes", "incidente_id"),
             ("emergencias", "incidente_id"),
@@ -546,6 +570,30 @@ def _ensure_incremental_schema() -> None:
             conn.execute(
                 text(
                     """
+                    CREATE INDEX IF NOT EXISTS idx_ubicaciones_incidente_creado
+                    ON ubicaciones(incidente_id, registrado_en DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_ubicaciones_tecnico_creado
+                    ON ubicaciones(tecnico_id, registrado_en DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_ubicaciones_asignacion_creado
+                    ON ubicaciones(asignacion_id, registrado_en DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
                     DO $$
                     BEGIN
                       IF EXISTS (
@@ -559,6 +607,60 @@ def _ensure_incremental_schema() -> None:
                         ALTER TABLE talleres
                         ADD CONSTRAINT fk_talleres_aprobado_por
                         FOREIGN KEY (aprobado_por) REFERENCES usuarios(id) NOT VALID;
+                      END IF;
+                    END$$;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_ubicaciones_tecnico_id'
+                      ) THEN
+                        ALTER TABLE ubicaciones
+                        ADD CONSTRAINT fk_ubicaciones_tecnico_id
+                        FOREIGN KEY (tecnico_id) REFERENCES tecnicos(id) NOT VALID;
+                      END IF;
+                    END$$;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_ubicaciones_asignacion_id'
+                      ) THEN
+                        ALTER TABLE ubicaciones
+                        ADD CONSTRAINT fk_ubicaciones_asignacion_id
+                        FOREIGN KEY (asignacion_id) REFERENCES asignaciones(id) NOT VALID;
+                      END IF;
+                    END$$;
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_ubicaciones_incidente_id'
+                      ) THEN
+                        ALTER TABLE ubicaciones
+                        ADD CONSTRAINT fk_ubicaciones_incidente_id
+                        FOREIGN KEY (incidente_id) REFERENCES incidentes(id) NOT VALID;
                       END IF;
                     END$$;
                     """
@@ -735,6 +837,7 @@ app.include_router(asignacion_router,  prefix="/api/asignacion",  tags=["Asignac
 app.include_router(asignacion_router,  prefix="/api/asignaciones", tags=["Asignación (Compat)"])
 app.include_router(pagos_router,       prefix="/api/pagos",       tags=["Pagos"])
 app.include_router(admin_router,       prefix="/api/admin",       tags=["Admin"])
+app.include_router(tecnico_router,     prefix="/api/tecnico",     tags=["Técnico"])
 
 app.include_router(websocket.router,   prefix="/api/ws",          tags=["WebSocket"])
 

@@ -49,12 +49,13 @@ class EstadoSolicitudClienteOut(BaseModel):
 class UbicacionTecnicoOut(BaseModel):
     incidente_id: str
     codigo_solicitud: str | None = None
-    tecnico_id: str | None = None
     tecnico_nombre: str | None = None
-    especialidad: str | None = None
-    lat: float | None = None
-    lng: float | None = None
-    estado: str
+    estado_servicio: str
+    latitud_tecnico: float | None = None
+    longitud_tecnico: float | None = None
+    latitud_cliente: float | None = None
+    longitud_cliente: float | None = None
+    ultima_actualizacion: str | None = None
     mensaje: str
 
 

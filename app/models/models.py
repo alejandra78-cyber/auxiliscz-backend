@@ -327,12 +327,19 @@ class Ubicacion(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     emergencia_id = Column(GUID(), ForeignKey("emergencias.id"), nullable=False)
+    tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True)
+    asignacion_id = Column(GUID(), ForeignKey("asignaciones.id"), nullable=True)
+    incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     latitud = Column(Float, nullable=False)
     longitud = Column(Float, nullable=False)
     fuente = Column(String(40), default="gps")
+    tipo = Column(String(30))
     registrado_en = Column(DateTime, default=local_now_naive)
 
     emergencia = relationship("Emergencia", back_populates="ubicaciones")
+    tecnico = relationship("Tecnico")
+    asignacion = relationship("Asignacion")
+    incidente = relationship("Incidente")
 
 
 class Asignacion(Base):
