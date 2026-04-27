@@ -19,6 +19,8 @@ from .schemas import (
     RolPermisoOut,
     TokenOut,
     UsuarioOut,
+    ValidateResetTokenIn,
+    ValidateResetTokenOut,
 )
 from app.services.notificaciones import desactivar_token_dispositivo, registrar_token_dispositivo
 from .services import (
@@ -31,6 +33,7 @@ from .services import (
     registrar_usuario,
     resetear_password,
     solicitar_recuperacion_password,
+    validar_token_password,
 )
 
 router = APIRouter()
@@ -38,13 +41,16 @@ router = APIRouter()
 
 @router.post("/register", response_model=UsuarioOut)
 def register(payload: RegisterIn, db: Session = Depends(get_db)):
+    nombre_completo = payload.nombre.strip()
+    if payload.apellido and payload.apellido.strip():
+        nombre_completo = f"{nombre_completo} {payload.apellido.strip()}"
     usuario = registrar_usuario(
         db,
-        nombre=payload.nombre,
+        nombre=nombre_completo,
         email=payload.email,
         password=payload.password,
         telefono=payload.telefono,
-        rol=payload.rol,
+        rol="conductor",
     )
     return usuario
 
@@ -83,6 +89,12 @@ def password_recovery_request(payload: RecuperarPasswordRequestIn, db: Session =
 def password_reset(payload: ResetPasswordIn, db: Session = Depends(get_db)):
     resetear_password(db, reset_token=payload.reset_token, nueva_password=payload.nueva_password)
     return {"ok": True, "mensaje": "Contraseña restablecida correctamente"}
+
+
+@router.post("/password/validate-token", response_model=ValidateResetTokenOut)
+def validate_password_token(payload: ValidateResetTokenIn, db: Session = Depends(get_db)):
+    validar_token_password(db, reset_token=payload.reset_token)
+    return ValidateResetTokenOut()
 
 
 @router.patch("/cambiar-password", response_model=CambiarPasswordOut)

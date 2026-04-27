@@ -5,6 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 class RegisterIn(BaseModel):
     nombre: str = Field(..., min_length=3)
+    apellido: str | None = Field(default=None, min_length=2)
     email: EmailStr
     password: str = Field(..., min_length=6)
     telefono: str | None = None
@@ -61,6 +62,15 @@ class RecuperarPasswordRequestOut(BaseModel):
 class ResetPasswordIn(BaseModel):
     reset_token: str
     nueva_password: str = Field(..., min_length=6)
+
+
+class ValidateResetTokenIn(BaseModel):
+    reset_token: str
+
+
+class ValidateResetTokenOut(BaseModel):
+    ok: bool = True
+    mensaje: str = "Token válido"
 
 
 class CambiarPasswordIn(BaseModel):

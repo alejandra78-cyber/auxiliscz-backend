@@ -4,7 +4,11 @@ Clasificación multimodal de incidentes vehiculares.
 """
 import openai
 import json
+import logging
+import os
 from typing import List, Dict
+
+logger = logging.getLogger(__name__)
 
 CATEGORIAS = ["bateria", "llanta", "motor", "choque", "llave", "otro", "incierto"]
 
@@ -44,7 +48,7 @@ Responde ÚNICAMENTE en JSON con este formato:
 Si la información es insuficiente o contradictoria, usa tipo "incierto".
 """
 
-    response = await openai.AsyncOpenAI().chat.completions.create(
+    response = await _client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
@@ -52,9 +56,11 @@ Si la información es insuficiente o contradictoria, usa tipo "incierto".
     )
 
     try:
-        resultado = json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content or ""
+        resultado = _parse_json_safely(content)
     except json.JSONDecodeError:
         resultado = {"tipo": "incierto", "prioridad": 2, "confianza": 0.5, "razon": "Error de parsing"}
+        logger.warning("IA clasificación devolvió JSON inválido")
 
     # Validar categoría
     if resultado.get("tipo") not in CATEGORIAS:
@@ -86,7 +92,7 @@ ai_modules/audio.py
 Transcripción de audio usando OpenAI Whisper.
 """
 import openai
-import tempfile, os
+import tempfile
 
 
 async def transcribir_audio(contenido: bytes, idioma: str = "es") -> str:
@@ -99,7 +105,7 @@ async def transcribir_audio(contenido: bytes, idioma: str = "es") -> str:
 
     try:
         with open(tmp_path, "rb") as audio_file:
-            transcripcion = await openai.AsyncOpenAI().audio.transcriptions.create(
+            transcripcion = await _client().audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
                 language=idioma
@@ -133,7 +139,7 @@ Identifica daños o problemas visibles. Responde en JSON:
   "confianza": <0.0-1.0>
 }"""
 
-    response = await openai.AsyncOpenAI().chat.completions.create(
+    response = await _client().chat.completions.create(
         model="gpt-4o",
         messages=[{
             "role": "user",
@@ -147,8 +153,10 @@ Identifica daños o problemas visibles. Responde en JSON:
 
     import json
     try:
-        return json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content or ""
+        return _parse_json_safely(content)
     except Exception:
+        logger.exception("IA visión: no se pudo parsear/analisar imagen")
         return {"problema_detectado": "No se pudo analizar", "confianza": 0.0}
 
 
@@ -184,10 +192,26 @@ Genera una ficha estructurada en español con:
 Sé conciso y técnico.
 """
 
-    response = await openai.AsyncOpenAI().chat.completions.create(
+    response = await _client().chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=400
     )
 
     return response.choices[0].message.content
+
+
+def _client() -> openai.AsyncOpenAI:
+    key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY no está configurada")
+    return openai.AsyncOpenAI(api_key=key)
+
+
+def _parse_json_safely(raw: str) -> dict:
+    txt = (raw or "").strip()
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        if txt.lower().startswith("json"):
+            txt = txt[4:].strip()
+    return json.loads(txt)

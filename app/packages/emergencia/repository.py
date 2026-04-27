@@ -2,6 +2,7 @@ import uuid
 import os
 
 from sqlalchemy.orm import Session, joinedload
+from app.core.time import local_now_naive
 
 from app.models.models import (
     Cliente,
@@ -81,6 +82,9 @@ def crear_solicitud_emergencia(
             prioridad=2,
             tipo=tipo,
             descripcion=descripcion,
+            latitud=lat,
+            longitud=lng,
+            ia_estado="pendiente",
             canal_origen="api",
         )
         db.add(incidente)
@@ -162,12 +166,17 @@ def agregar_evidencia_solicitud(
     tipo: str,
     transcripcion: str | None = None,
     url_archivo: str | None = None,
+    contenido_texto: str | None = None,
+    metadata_json: str | None = None,
 ) -> Evidencia:
     evidencia = Evidencia(
         id=uuid.uuid4(),
+        incidente_id=solicitud.incidente_id,
         tipo=tipo,
         transcripcion=transcripcion,
         url_archivo=url_archivo,
+        contenido_texto=contenido_texto,
+        metadata_json=metadata_json,
     )
     db.add(evidencia)
     db.flush()
@@ -192,6 +201,10 @@ def registrar_cambio_estado(
     solicitud.estado = estado_nuevo
     if solicitud.emergencia:
         solicitud.emergencia.estado = estado_nuevo
+    if solicitud.incidente:
+        solicitud.incidente.estado = estado_nuevo
+        if estado_nuevo in {"cancelada", "completada", "completado", "finalizado"}:
+            solicitud.incidente.cerrado_en = local_now_naive()
     db.add(
         Historial(
             id=uuid.uuid4(),

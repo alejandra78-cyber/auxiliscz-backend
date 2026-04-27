@@ -5,6 +5,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 
 from .schemas import (
+    CancelarSolicitudIn,
     CancelarSolicitudOut,
     EstadoSolicitudOut,
     ImagenIncidenteOut,
@@ -24,6 +25,7 @@ from .services import (
     listar_mensajes_solicitud,
     listar_notificaciones_solicitud,
     reportar_emergencia,
+    solicitud_es_cancelable,
 )
 
 router = APIRouter()
@@ -38,11 +40,12 @@ async def reportar_emergencia_endpoint(
     lng: float = Form(...),
     descripcion: str | None = Form(None),
     foto: UploadFile | None = File(None),
+    fotos: list[UploadFile] | None = File(None),
     audio: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    incidente_id = await reportar_emergencia(
+    data = await reportar_emergencia(
         db,
         background_tasks=background_tasks,
         current_user=current_user,
@@ -52,12 +55,18 @@ async def reportar_emergencia_endpoint(
         lng=lng,
         descripcion=descripcion,
         foto=foto,
+        fotos=fotos,
         audio=audio,
     )
     return ReportarEmergenciaOut(
-        incidente_id=incidente_id,
-        estado="pendiente",
-        mensaje="Emergencia registrada correctamente",
+        incidente_id=data["incidente_id"],
+        estado=data["estado"],
+        tipo=data.get("tipo"),
+        prioridad=data.get("prioridad"),
+        resumen_ia=data.get("resumen_ia"),
+        ia_estado=data.get("ia_estado"),
+        asignacion_id=data.get("asignacion_id"),
+        mensaje=data["mensaje"],
     )
 
 
@@ -74,20 +83,37 @@ def consultar_estado_solicitud_endpoint(
     )
     ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
     resumen_ia = None
+    if solicitud.incidente and solicitud.incidente.resumen_ia:
+        resumen_ia = solicitud.incidente.resumen_ia
     if getattr(solicitud, "evidencias", None):
         for link in reversed(solicitud.evidencias):
             ev = getattr(link, "evidencia", None)
-            if ev and ev.tipo == "resumen_ia" and ev.transcripcion:
+            if not ev or not ev.transcripcion:
+                continue
+            if ev.tipo == "resumen_ia":
                 resumen_ia = ev.transcripcion
                 break
+            # Compatibilidad: resumen IA guardado como tipo texto + metadata_json.subtipo=resumen_ia
+            try:
+                import json
+                meta = json.loads(ev.metadata_json or "{}")
+                if meta.get("subtipo") == "resumen_ia":
+                    resumen_ia = ev.transcripcion
+                    break
+            except Exception:
+                pass
     return EstadoSolicitudOut(
         incidente_id=str(solicitud.id),
         estado=str(solicitud.estado),
+        es_cancelable=solicitud_es_cancelable(solicitud),
+        fecha_actualizacion=solicitud.actualizado_en.isoformat() if solicitud.actualizado_en else None,
         prioridad=solicitud.prioridad,
         tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia and solicitud.emergencia.tipo else None,
         resumen_ia=resumen_ia,
         taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
         taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
+        tecnico_id=str(ultimo.tecnico_id) if ultimo and ultimo.tecnico_id else None,
+        tecnico_nombre=ultimo.tecnico.nombre if ultimo and ultimo.tecnico else None,
     )
 
 
@@ -137,10 +163,16 @@ async def cargar_imagen_incidente_endpoint(
 @router.patch("/solicitud/{incidente_id}/cancelar", response_model=CancelarSolicitudOut)
 def cancelar_solicitud_endpoint(
     incidente_id: str,
+    payload: CancelarSolicitudIn | None = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    solicitud = cancelar_solicitud(db, incidente_id=incidente_id, current_user=current_user)
+    solicitud = cancelar_solicitud(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        motivo_cancelacion=(payload.motivo_cancelacion if payload else None),
+    )
     return CancelarSolicitudOut(incidente_id=str(solicitud.id), estado=str(solicitud.estado))
 
 
