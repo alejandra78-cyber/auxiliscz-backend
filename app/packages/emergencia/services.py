@@ -1,5 +1,9 @@
 import json
 import logging
+import os
+import re
+import uuid
+from pathlib import Path
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -65,6 +69,29 @@ ESTADOS_NO_CANCELABLES = {
     "cancelado",
     "rechazada",
 }
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_UPLOADS_DIR = _PROJECT_ROOT / "uploads" / "emergencias"
+_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _safe_filename(name: str | None, default_ext: str = ".bin") -> str:
+    raw = (name or "").strip()
+    ext = Path(raw).suffix.lower()
+    if not ext or len(ext) > 8:
+        ext = default_ext
+    return f"{uuid.uuid4().hex}{ext}"
+
+
+def _save_uploaded_bytes(content: bytes, original_name: str | None, kind: str) -> str:
+    filename = _safe_filename(original_name, default_ext=".jpg" if kind == "imagen" else ".m4a")
+    out = _UPLOADS_DIR / filename
+    out.write_bytes(content)
+    public_base = os.getenv("BACKEND_PUBLIC_URL", "http://127.0.0.1:8000").strip().rstrip("/")
+    # Si BACKEND_PUBLIC_URL viene mal, dejamos fallback estable.
+    if not re.match(r"^https?://", public_base, re.IGNORECASE):
+        public_base = "http://127.0.0.1:8000"
+    return f"{public_base}/uploads/emergencias/{filename}"
 
 
 def _estado_key(value: str | None) -> str:
@@ -161,48 +188,40 @@ async def reportar_emergencia(
 
     if audio:
         contenido_audio = await audio.read()
-        try:
-            transcripcion = await transcribir_audio_a_texto(contenido_audio)
-        except Exception:
-            transcripcion = "No se pudo transcribir el audio"
-            ia_estado = "fallido"
-        transcripcion_audio = transcripcion
+        audio_url = _save_uploaded_bytes(contenido_audio, audio.filename, "audio")
+        # Para respuesta rápida de CU11: guardamos audio y dejamos la transcripción para segundo plano.
+        transcripcion_audio = None
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
             tipo="audio",
-            transcripcion=transcripcion,
-            contenido_texto=transcripcion,
+            url_archivo=audio_url,
+            transcripcion=None,
+            contenido_texto=None,
             metadata_json=json.dumps(
                 {"filename": audio.filename, "content_type": audio.content_type},
                 ensure_ascii=False,
             ),
         )
-        evidencias_datos.append({"tipo": "audio", "texto": transcripcion})
+        evidencias_datos.append({"tipo": "audio", "texto": ""})
 
     for foto_file in fotos_recibidas:
         contenido_foto = await foto_file.read()
-        try:
-            analisis_imagen = await clasificar_incidente_por_imagenes(contenido_foto)
-        except Exception:
-            analisis_imagen = {
-                "problema_detectado": "No se pudo analizar imagen",
-                "categoria_probable": "incierto",
-                "nivel_danio": "desconocido",
-                "confianza": 0.0,
-            }
-        analisis_imagenes.append(analisis_imagen)
+        foto_url = _save_uploaded_bytes(contenido_foto, foto_file.filename, "imagen")
+        # Para respuesta rápida de CU11: guardamos imagen y dejamos análisis visual para segundo plano.
+        analisis_imagenes.append({})
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
             tipo="imagen",
-            transcripcion=json.dumps(analisis_imagen, ensure_ascii=False),
+            url_archivo=foto_url,
+            transcripcion=None,
             metadata_json=json.dumps(
                 {"filename": foto_file.filename, "content_type": foto_file.content_type},
                 ensure_ascii=False,
             ),
         )
-        evidencias_datos.append({"tipo": "imagen", "datos": analisis_imagen})
+        evidencias_datos.append({"tipo": "imagen", "datos": {}})
 
     if descripcion_limpia:
         agregar_evidencia_solicitud(
@@ -214,37 +233,11 @@ async def reportar_emergencia(
         )
         evidencias_datos.append({"tipo": "texto", "texto": descripcion_limpia})
 
-    # IA inicial defensiva: no bloquea si falla y deja datos mínimos consistentes.
     tipo_ia = tipo_normalizado
     prioridad_ia = asignar_nivel_prioridad(tipo_ia)
-    confianza_ia = 0.5
+    confianza_ia = None
     resumen_ia: str | None = None
-    ia_estado = ia_estado or "pendiente"
-    try:
-        clasificacion_mm = await clasificar_incidente(evidencias_datos)
-        if clasificacion_mm:
-            tipo_ia = str(clasificacion_mm.get("tipo", tipo_ia))
-            if tipo_ia not in TIPOS_INCIDENTE_VALIDOS:
-                tipo_ia = "otro"
-            confianza_ia = float(clasificacion_mm.get("confianza", confianza_ia))
-        prioridad_ia = asignar_nivel_prioridad(tipo_ia)
-        try:
-            resumen_ia = await generar_ficha_resumen_incidente(
-                {"tipo": tipo_ia, "prioridad": prioridad_ia, "confianza": confianza_ia},
-                evidencias_datos,
-            )
-            ia_estado = "procesado"
-        except Exception:
-            logger.exception("IA resumen falló para solicitud=%s", solicitud.id)
-            resumen_ia = DEFAULT_RESUMEN_IA
-            ia_estado = "fallido"
-    except Exception:
-        logger.exception("IA clasificación falló para solicitud=%s", solicitud.id)
-        tipo_ia = DEFAULT_TIPO_IA
-        prioridad_ia = DEFAULT_PRIORIDAD_IA
-        confianza_ia = 0.0
-        resumen_ia = DEFAULT_RESUMEN_IA
-        ia_estado = "fallido"
+    ia_estado = "pendiente"
 
     # Notificación de creación al cliente
     crear_notificacion(
@@ -269,11 +262,29 @@ async def reportar_emergencia(
         solicitud.incidente.analisis_imagen = (
             json.dumps(analisis_imagenes, ensure_ascii=False) if analisis_imagenes else None
         )
-        solicitud.incidente.resumen_ia = resumen_ia or DEFAULT_RESUMEN_IA
+        solicitud.incidente.resumen_ia = resumen_ia
         solicitud.incidente.confianza_ia = confianza_ia
         solicitud.incidente.ia_estado = ia_estado
 
     db.commit()
+
+    # CU16 inmediato: asigna taller apenas se crea el incidente (sin esperar IA pesada).
+    try:
+        from app.packages.asignacion.services import asignar_taller_automaticamente
+
+        await asignar_taller_automaticamente(
+            db,
+            solicitud_id=str(solicitud.id),
+            lat=lat,
+            lng=lng,
+            tipo=tipo_ia,
+            prioridad=prioridad_ia,
+        )
+    except HTTPException:
+        # Si no hay candidato disponible, ya queda marcado por el servicio de asignación.
+        pass
+    except Exception:
+        logger.exception("Asignación automática inicial falló para solicitud=%s", solicitud.id)
 
     background_tasks.add_task(
         _procesar_asignacion_automatica,
@@ -288,7 +299,7 @@ async def reportar_emergencia(
         "estado": str(solicitud.estado),
         "tipo": tipo_ia,
         "prioridad": prioridad_ia,
-        "resumen_ia": resumen_ia or DEFAULT_RESUMEN_IA,
+        "resumen_ia": resumen_ia,
         "ia_estado": ia_estado,
         "mensaje": "Emergencia registrada correctamente",
     }
@@ -345,7 +356,8 @@ async def _procesar_asignacion_automatica(
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
-            tipo="clasificacion_ia",
+            # Compatibilidad DB: tipo_evidencia_enum solo admite imagen/audio/texto.
+            tipo="texto",
             transcripcion=json.dumps(
                 {
                     "tipo": tipo,
@@ -355,6 +367,7 @@ async def _procesar_asignacion_automatica(
                 },
                 ensure_ascii=False,
             ),
+            metadata_json=json.dumps({"subtipo": "clasificacion_ia"}, ensure_ascii=False),
         )
 
         try:
@@ -365,9 +378,11 @@ async def _procesar_asignacion_automatica(
             agregar_evidencia_solicitud(
                 db,
                 solicitud=solicitud,
-                tipo="resumen_ia",
+                # Compatibilidad DB: persistimos resumen IA como evidencia de texto con subtipo.
+                tipo="texto",
                 transcripcion=resumen,
                 contenido_texto=resumen,
+                metadata_json=json.dumps({"subtipo": "resumen_ia"}, ensure_ascii=False),
             )
             if solicitud.incidente:
                 solicitud.incidente.resumen_ia = resumen
@@ -485,6 +500,7 @@ async def cargar_imagen_incidente(
     if not _puede_ver_solicitud(solicitud, current_user):
         raise HTTPException(status_code=403, detail="No autorizado para adjuntar imagen")
     contenido = await imagen.read()
+    foto_url = _save_uploaded_bytes(contenido, imagen.filename, "imagen")
     try:
         analisis = await clasificar_incidente_por_imagenes(contenido)
     except Exception:
@@ -498,7 +514,12 @@ async def cargar_imagen_incidente(
         db,
         solicitud=solicitud,
         tipo="imagen",
+        url_archivo=foto_url,
         transcripcion=json.dumps(analisis, ensure_ascii=False),
+        metadata_json=json.dumps(
+            {"filename": imagen.filename, "content_type": imagen.content_type},
+            ensure_ascii=False,
+        ),
     )
     db.commit()
     db.refresh(evidencia)

@@ -1053,7 +1053,6 @@ def actualizar_estado_servicio(
     current_user: Usuario,
     estado: str,
     observacion: str | None = None,
-    costo: float | None = None,
     tecnico_id: str | None = None,
 ) -> Solicitud:
     if current_user.rol not in {"taller", "tecnico"}:
@@ -1151,8 +1150,6 @@ def actualizar_estado_servicio(
         asig_actual.tecnico.estado_operativo = "disponible"
 
     comentario = observacion or "Actualización de estado del servicio"
-    if costo and costo > 0:
-        comentario = f"{comentario}. Costo reportado: {costo}"
     _guardar_historial(db, solicitud, solicitud.estado, estado_nuevo, comentario)
 
     db.add(

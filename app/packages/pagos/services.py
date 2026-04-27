@@ -170,7 +170,7 @@ def generar_cotizacion_taller(
         raise HTTPException(status_code=403, detail="La solicitud no pertenece a tu taller")
 
     estado_asig = (asig.estado or "").strip().lower()
-    if estado_asig not in {"en_diagnostico", "diagnostico_completado", "en_proceso", "tecnico_asignado"}:
+    if estado_asig not in {"en_diagnostico", "diagnostico_completado"}:
         raise HTTPException(
             status_code=400,
             detail="Solo se puede generar cotización después del diagnóstico",
@@ -357,6 +357,11 @@ def procesar_pago_cliente(
     solicitud = db.query(Solicitud).filter(Solicitud.id == cot.solicitud_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud asociada no encontrada")
+    if (solicitud.estado or "").strip().lower() not in {"trabajo_completado", "esperando_pago"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se puede procesar pago cuando el trabajo esté completado",
+        )
 
     metodo = (metodo_pago or "").strip().lower()
     if metodo not in {"qr", "transferencia", "efectivo"}:

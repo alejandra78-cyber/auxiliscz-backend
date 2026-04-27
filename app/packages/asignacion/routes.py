@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+import json
 
 from app.core.database import get_db
 from app.core.security import get_current_user
@@ -39,6 +40,19 @@ from .services import (
 router = APIRouter()
 
 
+def _resolver_url_evidencia(ev) -> str | None:
+    if getattr(ev, "url_archivo", None):
+        return ev.url_archivo
+    try:
+        meta = json.loads(ev.metadata_json or "{}")
+    except Exception:
+        meta = {}
+    filename = str(meta.get("filename") or "").strip()
+    if not filename:
+        return None
+    return f"/uploads/emergencias/{filename}"
+
+
 def _to_solicitud_out(i) -> SolicitudServicioOut:
     ultimo = (
         sorted(
@@ -49,12 +63,25 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
         else None
     )
     resumen_ia = None
+    if getattr(i, "incidente", None) and getattr(i.incidente, "resumen_ia", None):
+        resumen_ia = i.incidente.resumen_ia
     if getattr(i, "evidencias", None):
         for link in reversed(i.evidencias):
             ev = getattr(link, "evidencia", None)
-            if ev and ev.tipo == "resumen_ia" and ev.transcripcion:
+            if not ev or not ev.transcripcion:
+                continue
+            if ev.tipo == "resumen_ia":
                 resumen_ia = ev.transcripcion
                 break
+            # Compatibilidad: resumen IA guardado como evidencia texto con metadata_json.subtipo
+            if ev.tipo == "texto" and ev.metadata_json:
+                try:
+                    meta = json.loads(ev.metadata_json)
+                    if meta.get("subtipo") == "resumen_ia":
+                        resumen_ia = ev.transcripcion
+                        break
+                except Exception:
+                    pass
     latitud = None
     longitud = None
     if i.emergencia and i.emergencia.ubicaciones:
@@ -105,8 +132,9 @@ def _to_solicitud_detalle_out(i) -> SolicitudServicioDetalleOut:
             EvidenciaOut(
                 id=str(ev.id),
                 tipo=str(ev.tipo),
-                url_archivo=ev.url_archivo,
+                url_archivo=_resolver_url_evidencia(ev),
                 transcripcion=ev.transcripcion,
+                metadata_json=ev.metadata_json,
                 subido_en=ev.subido_en.isoformat() if ev.subido_en else None,
             )
         )
@@ -336,7 +364,6 @@ def actualizar_estado_endpoint(
         current_user=current_user,
         estado=payload.estado,
         observacion=payload.observacion,
-        costo=payload.costo,
         tecnico_id=payload.tecnico_id,
     )
     return _to_solicitud_out(i)

@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 from firebase_admin import credentials, initialize_app
 import firebase_admin
@@ -825,6 +826,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
+os.makedirs(_UPLOADS_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_UPLOADS_DIR), name="uploads")
 
 app.include_router(auth_router,        prefix="/api/auth",        tags=["Autenticación"])
 app.include_router(cliente_router,     prefix="/api/cliente",     tags=["Cliente"])

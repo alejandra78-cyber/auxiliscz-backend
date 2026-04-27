@@ -70,6 +70,7 @@ class EvidenciaOut(BaseModel):
     tipo: str
     url_archivo: str | None = None
     transcripcion: str | None = None
+    metadata_json: str | None = None
     subido_en: str | None = None
 
 
@@ -97,7 +98,6 @@ class ActualizarEstadoIn(BaseModel):
     estado: str
     tecnico_id: str | None = None
     observacion: str | None = None
-    costo: float | None = None
 
 
 class TecnicoDisponibleOut(BaseModel):

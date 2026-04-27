@@ -10,6 +10,8 @@ CANCELABLE_STATES = {
     "pendiente",
     "buscando_taller",
     "pendiente_asignacion",
+    "en_revision",
+    "en_evaluacion",
     "asignado",
     "pendiente_respuesta",
     "pendiente_respuesta_taller",
@@ -299,7 +301,11 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
 
     puede_ver_cotizacion = cotizacion is not None
     puede_responder_cotizacion = bool(cotizacion and estado_cot in {"emitida", "pendiente", "enviada"})
-    puede_pagar = bool(cotizacion and (pago is None or _estado_key(pago.estado) in {"pendiente", "pendiente_pago"}))
+    puede_pagar = bool(
+        cotizacion
+        and estado_key in {"trabajo_completado", "esperando_pago"}
+        and (pago is None or _estado_key(pago.estado) in {"pendiente", "pendiente_pago", "pendiente_verificacion"})
+    )
     puede_evaluar = estado_key in {"finalizado", "servicio_completado", "pagado"}
 
     return {

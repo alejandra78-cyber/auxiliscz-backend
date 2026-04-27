@@ -88,9 +88,20 @@ def consultar_estado_solicitud_endpoint(
     if getattr(solicitud, "evidencias", None):
         for link in reversed(solicitud.evidencias):
             ev = getattr(link, "evidencia", None)
-            if ev and ev.tipo == "resumen_ia" and ev.transcripcion:
+            if not ev or not ev.transcripcion:
+                continue
+            if ev.tipo == "resumen_ia":
                 resumen_ia = ev.transcripcion
                 break
+            # Compatibilidad: resumen IA guardado como tipo texto + metadata_json.subtipo=resumen_ia
+            try:
+                import json
+                meta = json.loads(ev.metadata_json or "{}")
+                if meta.get("subtipo") == "resumen_ia":
+                    resumen_ia = ev.transcripcion
+                    break
+            except Exception:
+                pass
     return EstadoSolicitudOut(
         incidente_id=str(solicitud.id),
         estado=str(solicitud.estado),

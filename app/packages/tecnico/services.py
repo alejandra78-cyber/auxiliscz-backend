@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.time import local_now_naive
 from app.models.models import Asignacion, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
 
-ESTADOS_COMPARTIR_UBICACION = {"tecnico_asignado", "en_camino", "en_proceso"}
+ESTADOS_COMPARTIR_UBICACION = {"en_camino", "en_proceso"}
 
 
 def _estado_key(value: str | None) -> str:
@@ -100,7 +100,7 @@ def reportar_mi_ubicacion(
     if estado not in ESTADOS_COMPARTIR_UBICACION:
         raise HTTPException(
             status_code=400,
-            detail="Solo puedes compartir ubicación en estados tecnico_asignado, en_camino o en_proceso",
+            detail="Solo puedes compartir ubicación en estados en_camino o en_proceso",
         )
 
     solicitud = asignacion.solicitud
@@ -152,4 +152,3 @@ def reportar_mi_ubicacion(
         "estado_servicio": asignacion.estado or "tecnico_asignado",
         "ultima_actualizacion": ahora.isoformat(),
     }
-
