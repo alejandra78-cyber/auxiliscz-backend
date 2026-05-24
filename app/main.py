@@ -218,6 +218,108 @@ def _ensure_incremental_schema() -> None:
                     if conn.dialect.name == "postgresql"
                     else text("ALTER TABLE asignaciones ADD COLUMN fecha_inicio_camino DATETIME")
                 )
+
+        if "cotizaciones" in tables:
+            cols_cot = {c["name"] for c in inspector.get_columns("cotizaciones")}
+            if "incidente_id" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN incidente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN incidente_id CHAR(36)")
+                )
+            if "asignacion_id" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN asignacion_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN asignacion_id CHAR(36)")
+                )
+            if "taller_id" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN taller_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN taller_id CHAR(36)")
+                )
+            if "cliente_id" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN cliente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN cliente_id CHAR(36)")
+                )
+            if "observaciones" not in cols_cot:
+                conn.execute(text("ALTER TABLE cotizaciones ADD COLUMN observaciones TEXT"))
+            if "fecha_emision" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN fecha_emision TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN fecha_emision DATETIME")
+                )
+            if "validez_hasta" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN validez_hasta TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN validez_hasta DATETIME")
+                )
+            if "fecha_respuesta_cliente" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN fecha_respuesta_cliente TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN fecha_respuesta_cliente DATETIME")
+                )
+            if "actualizado_en" not in cols_cot:
+                conn.execute(
+                    text("ALTER TABLE cotizaciones ADD COLUMN actualizado_en TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE cotizaciones ADD COLUMN actualizado_en DATETIME")
+                )
+
+            if conn.dialect.name == "postgresql":
+                # Compatibilidad con esquemas legacy donde pago_id o solicitud_id quedaron rígidos.
+                conn.execute(text("ALTER TABLE cotizaciones ALTER COLUMN pago_id DROP NOT NULL"))
+                conn.execute(text("ALTER TABLE cotizaciones ALTER COLUMN solicitud_id DROP NOT NULL"))
+
+        if "pagos" in tables:
+            cols_pago = {c["name"] for c in inspector.get_columns("pagos")}
+            if "incidente_id" not in cols_pago:
+                conn.execute(
+                    text("ALTER TABLE pagos ADD COLUMN incidente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE pagos ADD COLUMN incidente_id CHAR(36)")
+                )
+            if "cliente_id" not in cols_pago:
+                conn.execute(
+                    text("ALTER TABLE pagos ADD COLUMN cliente_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE pagos ADD COLUMN cliente_id CHAR(36)")
+                )
+            if "taller_id" not in cols_pago:
+                conn.execute(
+                    text("ALTER TABLE pagos ADD COLUMN taller_id UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE pagos ADD COLUMN taller_id CHAR(36)")
+                )
+            if "comprobante_url" not in cols_pago:
+                conn.execute(text("ALTER TABLE pagos ADD COLUMN comprobante_url VARCHAR(500)"))
+            if "referencia" not in cols_pago:
+                conn.execute(text("ALTER TABLE pagos ADD COLUMN referencia VARCHAR(120)"))
+            if "fecha_verificacion" not in cols_pago:
+                conn.execute(
+                    text("ALTER TABLE pagos ADD COLUMN fecha_verificacion TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE pagos ADD COLUMN fecha_verificacion DATETIME")
+                )
+            if "verificado_por" not in cols_pago:
+                conn.execute(
+                    text("ALTER TABLE pagos ADD COLUMN verificado_por UUID")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE pagos ADD COLUMN verificado_por CHAR(36)")
+                )
+            if "comision_plataforma" not in cols_pago:
+                conn.execute(text("ALTER TABLE pagos ADD COLUMN comision_plataforma DOUBLE PRECISION"))
+            if "monto_taller" not in cols_pago:
+                conn.execute(text("ALTER TABLE pagos ADD COLUMN monto_taller DOUBLE PRECISION"))
+
+            if conn.dialect.name == "postgresql":
+                conn.execute(text("ALTER TABLE pagos ALTER COLUMN incidente_id DROP NOT NULL"))
             if "fecha_inicio_servicio" not in cols_asig:
                 conn.execute(
                     text("ALTER TABLE asignaciones ADD COLUMN fecha_inicio_servicio TIMESTAMP WITHOUT TIME ZONE")

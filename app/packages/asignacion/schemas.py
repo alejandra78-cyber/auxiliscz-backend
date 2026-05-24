@@ -95,8 +95,10 @@ class AsignarServicioIn(BaseModel):
 
 
 class ActualizarEstadoIn(BaseModel):
-    estado: str
+    estado: str | None = None
+    accion: str | None = None
     tecnico_id: str | None = None
+    servicio: str | None = None
     observacion: str | None = None
 
 

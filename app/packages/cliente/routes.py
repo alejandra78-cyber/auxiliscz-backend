@@ -37,6 +37,21 @@ from .services import (
 router = APIRouter()
 
 
+def _tipo_prioridad_actual(solicitud):
+    tipo = None
+    prioridad = None
+    if getattr(solicitud, "incidente", None):
+        if solicitud.incidente.tipo:
+            tipo = str(solicitud.incidente.tipo)
+        if solicitud.incidente.prioridad is not None:
+            prioridad = int(solicitud.incidente.prioridad)
+    if not tipo and getattr(solicitud, "emergencia", None) and solicitud.emergencia.tipo:
+        tipo = str(solicitud.emergencia.tipo)
+    if prioridad is None:
+        prioridad = int(solicitud.prioridad) if solicitud.prioridad is not None else None
+    return tipo, prioridad
+
+
 @router.post("/vehiculos", response_model=VehiculoOut)
 def registrar_vehiculo_endpoint(
     payload: VehiculoCreateIn,
@@ -97,12 +112,13 @@ def estado_ultima_solicitud_cliente_endpoint(
 ):
     solicitud = consultar_estado_ultima_solicitud_cliente(db, current_user=current_user)
     ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
+    tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
         codigo_solicitud=f"SOL-{str(solicitud.id).split('-')[0].upper()}",
         estado=str(solicitud.estado),
-        prioridad=solicitud.prioridad,
-        tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
+        prioridad=prioridad,
+        tipo=tipo,
         taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
         taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
     )
@@ -116,12 +132,13 @@ def estado_solicitud_cliente_endpoint(
 ):
     solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
     ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
+    tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
         codigo_solicitud=f"SOL-{str(solicitud.id).split('-')[0].upper()}",
         estado=str(solicitud.estado),
-        prioridad=solicitud.prioridad,
-        tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia else None,
+        prioridad=prioridad,
+        tipo=tipo,
         taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
         taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
     )
@@ -156,8 +173,8 @@ def solicitudes_seguimiento_endpoint(
             incidente_id=str(s.id),
             codigo_solicitud=f"SOL-{str(s.id).split('-')[0].upper()}",
             estado=str(s.estado),
-            tipo=str(s.emergencia.tipo) if s.emergencia else None,
-            prioridad=s.prioridad,
+            tipo=_tipo_prioridad_actual(s)[0],
+            prioridad=_tipo_prioridad_actual(s)[1],
         )
         for s in rows
     ]

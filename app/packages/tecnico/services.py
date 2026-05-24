@@ -1,12 +1,13 @@
 import uuid
+import math
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.time import local_now_naive
-from app.models.models import Asignacion, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
+from app.models.models import Asignacion, Historial, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
 
-ESTADOS_COMPARTIR_UBICACION = {"en_camino", "en_proceso"}
+ESTADOS_COMPARTIR_UBICACION = {"tecnico_asignado", "en_camino", "en_diagnostico", "en_proceso"}
 
 
 def _estado_key(value: str | None) -> str:
@@ -22,6 +23,14 @@ def _obtener_tecnico_de_usuario(db: Session, current_user: Usuario) -> Tecnico:
 
 def _codigo_solicitud(solicitud_id: str) -> str:
     return f"SOL-{str(solicitud_id).split('-')[0].upper()}"
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radio = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return 2 * radio * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def listar_mis_servicios_asignados(db: Session, *, current_user: Usuario) -> list[dict]:
@@ -100,7 +109,7 @@ def reportar_mi_ubicacion(
     if estado not in ESTADOS_COMPARTIR_UBICACION:
         raise HTTPException(
             status_code=400,
-            detail="Solo puedes compartir ubicación en estados en_camino o en_proceso",
+            detail="Solo puedes compartir ubicación en estados tecnico_asignado, en_camino, en_diagnostico o en_proceso",
         )
 
     solicitud = asignacion.solicitud
@@ -123,13 +132,70 @@ def reportar_mi_ubicacion(
         )
     )
 
-    tecnico.latitud_actual = float(latitud)
-    tecnico.longitud_actual = float(longitud)
+    lat_f = float(latitud)
+    lng_f = float(longitud)
+    tecnico.latitud_actual = lat_f
+    tecnico.longitud_actual = lng_f
     tecnico.lat_actual = float(latitud)
     tecnico.lng_actual = float(longitud)
     tecnico.ultima_actualizacion_ubicacion = ahora
-    if _estado_key(asignacion.estado) == "en_camino":
-        tecnico.estado_operativo = "en_camino"
+
+    # Avance automático por acción real:
+    # - primer envío con técnico asignado => en_camino
+    estado_servicio = _estado_key(asignacion.estado)
+    if estado_servicio == "tecnico_asignado":
+        anterior = asignacion.estado or "tecnico_asignado"
+        asignacion.estado = "en_camino"
+        if solicitud.incidente:
+            solicitud.incidente.estado = "en_camino"
+        solicitud.estado = "en_camino"
+        db.add(
+            Historial(
+                id=uuid.uuid4(),
+                solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
+                estado_anterior=anterior,
+                estado_nuevo="en_camino",
+                comentario="Cambio automático: técnico inició seguimiento de ubicación",
+            )
+        )
+        estado_servicio = "en_camino"
+
+    # Si el técnico está cerca del punto de emergencia, marcar llegada automáticamente.
+    if estado_servicio == "en_camino":
+        lat_cli = None
+        lng_cli = None
+        if solicitud.emergencia and solicitud.emergencia.ubicaciones:
+            ubicaciones_cliente = [u for u in solicitud.emergencia.ubicaciones if (u.tipo or "cliente") != "tecnico"]
+            if ubicaciones_cliente:
+                ultima_cli = sorted(
+                    ubicaciones_cliente,
+                    key=lambda u: u.registrado_en or local_now_naive(),
+                )[-1]
+                lat_cli = float(ultima_cli.latitud)
+                lng_cli = float(ultima_cli.longitud)
+        if lat_cli is not None and lng_cli is not None:
+            distancia = _haversine_km(lat_f, lng_f, lat_cli, lng_cli)
+            if distancia <= 0.12:
+                anterior = asignacion.estado or "en_camino"
+                asignacion.estado = "en_diagnostico"
+                if solicitud.incidente:
+                    solicitud.incidente.estado = "en_diagnostico"
+                solicitud.estado = "en_diagnostico"
+                db.add(
+                    Historial(
+                        id=uuid.uuid4(),
+                        solicitud_id=solicitud.id,
+                        incidente_id=solicitud.incidente_id,
+                        estado_anterior=anterior,
+                        estado_nuevo="en_diagnostico",
+                        comentario="Cambio automático: técnico llegó al lugar de la emergencia",
+                    )
+                )
+                estado_servicio = "en_diagnostico"
+
+    if estado_servicio in {"en_camino", "en_diagnostico", "en_proceso"}:
+        tecnico.estado_operativo = "en_camino" if estado_servicio == "en_camino" else "en_proceso"
         tecnico.disponible = False
         if solicitud.cliente:
             db.add(

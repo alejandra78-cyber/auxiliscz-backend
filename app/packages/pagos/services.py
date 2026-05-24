@@ -1,7 +1,11 @@
 import uuid
 from datetime import datetime
+import logging
+import os
 
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.time import local_now_naive
@@ -18,6 +22,42 @@ from app.models.models import (
 )
 
 from .schemas import CotizacionDecisionOut, CotizacionOut, PagosDemoOut
+
+logger = logging.getLogger(__name__)
+
+
+def _estado_pago_compatible(db: Session, estado_semantico: str) -> str:
+    """
+    Retorna un valor compatible con el enum real de pagos.estado.
+    Soporta ambos esquemas:
+    - nuevo: pendiente_verificacion/pagado
+    - legacy: pendiente/completado
+    """
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT e.enumlabel
+                FROM pg_type t
+                JOIN pg_enum e ON t.oid = e.enumtypid
+                JOIN pg_namespace n ON n.oid = t.typnamespace
+                WHERE n.nspname = 'public'
+                  AND t.typname = 'estado_pago_enum'
+                """
+            )
+        ).fetchall()
+        permitidos = {str(r[0]) for r in rows}
+    except Exception:
+        permitidos = set()
+
+    if estado_semantico in permitidos:
+        return estado_semantico
+
+    fallback = {
+        "pendiente_verificacion": "pendiente",
+        "pagado": "completado",
+    }
+    return fallback.get(estado_semantico, estado_semantico)
 
 
 def estado_paquete_pagos() -> PagosDemoOut:
@@ -69,6 +109,13 @@ def _serializar_cotizacion(c: Cotizacion) -> CotizacionOut:
         elif solicitud.emergencia and solicitud.emergencia.tipo:
             tipo_problema = solicitud.emergencia.tipo
 
+    def _to_iso(value):
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
     return CotizacionOut(
         id=str(c.id),
         incidente_id=str(c.incidente_id) if c.incidente_id else None,
@@ -76,15 +123,13 @@ def _serializar_cotizacion(c: Cotizacion) -> CotizacionOut:
         asignacion_id=str(c.asignacion_id) if c.asignacion_id else None,
         taller_id=str(c.taller_id) if c.taller_id else None,
         cliente_id=str(c.cliente_id) if c.cliente_id else None,
-        monto_total=float(c.monto),
+        monto_total=float(c.monto or 0),
         detalle=c.detalle,
         observaciones=c.observaciones,
         estado=str(c.estado),
-        fecha_emision=c.fecha_emision.isoformat() if c.fecha_emision else None,
-        validez_hasta=c.validez_hasta.isoformat() if c.validez_hasta else None,
-        fecha_respuesta_cliente=(
-            c.fecha_respuesta_cliente.isoformat() if c.fecha_respuesta_cliente else None
-        ),
+        fecha_emision=_to_iso(c.fecha_emision),
+        validez_hasta=_to_iso(c.validez_hasta),
+        fecha_respuesta_cliente=_to_iso(c.fecha_respuesta_cliente),
         codigo_solicitud=codigo_solicitud,
         cliente_nombre=cliente_nombre,
         vehiculo_placa=vehiculo_placa,
@@ -170,7 +215,9 @@ def generar_cotizacion_taller(
         raise HTTPException(status_code=403, detail="La solicitud no pertenece a tu taller")
 
     estado_asig = (asig.estado or "").strip().lower()
-    if estado_asig not in {"en_diagnostico", "diagnostico_completado"}:
+    estado_sol = (solicitud.estado or "").strip().lower()
+    estados_permitidos_cot = {"en_diagnostico", "diagnostico_completado"}
+    if estado_asig not in estados_permitidos_cot and estado_sol not in estados_permitidos_cot:
         raise HTTPException(
             status_code=400,
             detail="Solo se puede generar cotización después del diagnóstico",
@@ -183,44 +230,56 @@ def generar_cotizacion_taller(
         except ValueError:
             raise HTTPException(status_code=400, detail="validez_hasta debe estar en formato ISO")
 
-    cot = Cotizacion(
-        id=uuid.uuid4(),
-        solicitud_id=solicitud.id,
-        incidente_id=solicitud.incidente_id,
-        asignacion_id=asig.id,
-        taller_id=mi_taller.id,
-        cliente_id=solicitud.cliente_id,
-        monto=float(monto_total),
-        detalle=detalle.strip(),
-        observaciones=(observaciones or "").strip() or None,
-        estado="emitida",
-        fecha_emision=local_now_naive(),
-        validez_hasta=validez_dt,
-        creado_en=local_now_naive(),
-        actualizado_en=local_now_naive(),
-    )
-    db.add(cot)
+    try:
+        cot = Cotizacion(
+            id=uuid.uuid4(),
+            solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
+            asignacion_id=asig.id,
+            taller_id=mi_taller.id,
+            cliente_id=solicitud.cliente_id,
+            monto=float(monto_total),
+            detalle=detalle.strip(),
+            observaciones=(observaciones or "").strip() or None,
+            estado="emitida",
+            fecha_emision=local_now_naive(),
+            validez_hasta=validez_dt,
+            creado_en=local_now_naive(),
+            actualizado_en=local_now_naive(),
+        )
+        db.add(cot)
 
-    _agregar_historial(
-        db,
-        solicitud,
-        "cotizacion_emitida",
-        f"Cotización emitida por taller {mi_taller.nombre}",
-    )
-
-    if solicitud.cliente:
-        _notificar(
+        _agregar_historial(
             db,
-            usuario_id=solicitud.cliente.usuario_id,
-            solicitud=solicitud,
-            titulo="Nueva cotización",
-            mensaje="Tu solicitud tiene una cotización pendiente de respuesta",
-            tipo="cotizacion_emitida",
+            solicitud,
+            "cotizacion_emitida",
+            f"Cotización emitida por taller {mi_taller.nombre}",
         )
 
-    db.commit()
-    db.refresh(cot)
-    return cot
+        if solicitud.cliente:
+            _notificar(
+                db,
+                usuario_id=solicitud.cliente.usuario_id,
+                solicitud=solicitud,
+                titulo="Nueva cotización",
+                mensaje="Tu solicitud tiene una cotización pendiente de respuesta",
+                tipo="cotizacion_emitida",
+            )
+
+        db.commit()
+        db.refresh(cot)
+        return cot
+    except IntegrityError as exc:
+        db.rollback()
+        logger.exception("Error de integridad al generar cotización")
+        raise HTTPException(
+            status_code=400,
+            detail="No se pudo generar la cotización por datos incompatibles. Verifica migraciones de pagos/cotizaciones.",
+        ) from exc
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Error inesperado al generar cotización")
+        raise HTTPException(status_code=500, detail=f"Error interno al generar cotización: {exc}") from exc
 
 
 def obtener_cotizacion_cliente(
@@ -263,7 +322,14 @@ def listar_cotizaciones_taller(
     if (estado or "").strip():
         query = query.filter(Cotizacion.estado == estado.strip().lower())
 
-    return query.order_by(Cotizacion.creado_en.desc()).all()
+    try:
+        return query.order_by(Cotizacion.creado_en.desc()).all()
+    except Exception as exc:
+        logger.exception("Error listando cotizaciones del taller")
+        raise HTTPException(
+            status_code=500,
+            detail=f"No se pudieron listar cotizaciones. Revisa consistencia de la tabla cotizaciones. ({exc})",
+        ) from exc
 
 
 def responder_cotizacion_cliente(
@@ -291,6 +357,7 @@ def responder_cotizacion_cliente(
     solicitud = db.query(Solicitud).filter(Solicitud.id == cot.solicitud_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud asociada no encontrada")
+    asig = _ultimo_asignacion(solicitud)
 
     cot.estado = "aceptada" if aceptar else "rechazada"
     cot.observaciones = ((cot.observaciones or "") + ("\n" if cot.observaciones and observaciones else "") + (observaciones or "")).strip() or cot.observaciones
@@ -304,6 +371,8 @@ def responder_cotizacion_cliente(
         nuevo_estado,
         "Cliente aceptó cotización" if aceptar else "Cliente rechazó cotización",
     )
+    if asig:
+        asig.estado = nuevo_estado
 
     if cot.taller and cot.taller.usuario_id:
         _notificar(
@@ -357,6 +426,7 @@ def procesar_pago_cliente(
     solicitud = db.query(Solicitud).filter(Solicitud.id == cot.solicitud_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud asociada no encontrada")
+    asig = _ultimo_asignacion(solicitud)
     if (solicitud.estado or "").strip().lower() not in {"trabajo_completado", "esperando_pago"}:
         raise HTTPException(
             status_code=400,
@@ -369,9 +439,33 @@ def procesar_pago_cliente(
 
     comision = round(float(cot.monto) * 0.10, 2)
     monto_taller = round(float(cot.monto) - comision, 2)
-    estado_pago = "pendiente_verificacion" if metodo in {"qr", "transferencia"} else "pagado"
+    auto_confirmar_simulado = os.getenv("PAGOS_SIMULADOS_AUTO_CONFIRMAR", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "si",
+    }
+    pago_confirmado = metodo == "efectivo" or auto_confirmar_simulado
+    estado_semantico = "pagado" if pago_confirmado else "pendiente_verificacion"
+    estado_pago = _estado_pago_compatible(db, estado_semantico)
 
     pago = cot.pago
+    if pago:
+        estado_pago_actual = (pago.estado or "").strip().lower()
+        # Idempotencia estricta: si ya está completado/pagado no repetir.
+        if estado_pago_actual in {"completado", "pagado"}:
+            return _serializar_pago(
+                pago,
+                cotizacion_id=str(cot.id),
+                mensaje="El pago ya fue registrado anteriormente",
+            )
+        # Si ya existe pendiente y no se confirmó, evitar duplicados.
+        if estado_pago_actual in {"pendiente", "pendiente_verificacion"} and not pago_confirmado:
+            return _serializar_pago(
+                pago,
+                cotizacion_id=str(cot.id),
+                mensaje="El pago ya fue registrado y está pendiente de verificación",
+            )
     if not pago:
         pago = Pago(
             id=uuid.uuid4(),
@@ -386,8 +480,8 @@ def procesar_pago_cliente(
             comision_plataforma=comision,
             monto_taller=monto_taller,
             pagado_en=local_now_naive(),
-            fecha_verificacion=local_now_naive() if estado_pago == "pagado" else None,
-            verificado_por=current_user.id if estado_pago == "pagado" else None,
+            fecha_verificacion=local_now_naive() if pago_confirmado else None,
+            verificado_por=current_user.id if pago_confirmado else None,
         )
         db.add(pago)
         db.flush()
@@ -403,23 +497,28 @@ def procesar_pago_cliente(
         pago.comision_plataforma = comision
         pago.monto_taller = monto_taller
         pago.pagado_en = local_now_naive()
-        pago.fecha_verificacion = local_now_naive() if estado_pago == "pagado" else None
-        pago.verificado_por = current_user.id if estado_pago == "pagado" else None
+        pago.fecha_verificacion = local_now_naive() if pago_confirmado else None
+        pago.verificado_por = current_user.id if pago_confirmado else None
 
-    nuevo_estado = "pagado" if estado_pago == "pagado" else "esperando_pago"
+    nuevo_estado = "pagado" if pago_confirmado else "esperando_pago"
     _agregar_historial(
         db,
         solicitud,
         nuevo_estado,
-        "Pago confirmado" if estado_pago == "pagado" else "Pago pendiente de verificación",
+        "Pago confirmado" if pago_confirmado else "Pago pendiente de verificación",
     )
-    if estado_pago == "pagado":
+    if asig:
+        asig.estado = nuevo_estado
+    if pago_confirmado:
         _agregar_historial(
             db,
             solicitud,
             "finalizado",
             "Servicio finalizado por pago confirmado",
         )
+        if asig:
+            asig.estado = "finalizado"
+            asig.fecha_finalizacion = local_now_naive()
 
     if cot.taller and cot.taller.usuario_id:
         _notificar(
@@ -427,8 +526,8 @@ def procesar_pago_cliente(
             usuario_id=cot.taller.usuario_id,
             solicitud=solicitud,
             titulo="Actualización de pago",
-            mensaje="El cliente registró pago pendiente de verificación" if estado_pago != "pagado" else "Pago confirmado del servicio",
-            tipo="pago_pendiente" if estado_pago != "pagado" else "pago_confirmado",
+            mensaje="El cliente registró pago pendiente de verificación" if not pago_confirmado else "Pago confirmado del servicio",
+            tipo="pago_pendiente" if not pago_confirmado else "pago_confirmado",
         )
 
     db.commit()
@@ -436,5 +535,5 @@ def procesar_pago_cliente(
     return _serializar_pago(
         pago,
         cotizacion_id=str(cot.id),
-        mensaje="Pago registrado correctamente" if estado_pago != "pagado" else "Pago procesado y servicio finalizado",
+        mensaje="Pago registrado correctamente" if not pago_confirmado else "Pago procesado y servicio finalizado",
     )

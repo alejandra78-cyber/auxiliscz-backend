@@ -224,7 +224,15 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         }
 
     estado_servicio = _estado_key(asignacion.estado or solicitud.estado)
-    if estado_servicio not in {"tecnico_asignado", "en_camino", "en_proceso"}:
+    if estado_servicio not in {
+        "tecnico_asignado",
+        "en_camino",
+        "en_diagnostico",
+        "diagnostico_completado",
+        "cotizacion_emitida",
+        "cotizacion_aceptada",
+        "en_proceso",
+    }:
         return {
             "incidente_id": str(solicitud.id),
             "codigo_solicitud": _codigo_solicitud(solicitud),
@@ -310,7 +318,17 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
 
     return {
         "puede_cancelar": estado_key in CANCELABLE_STATES,
-        "puede_ver_tecnico": tiene_tecnico and estado_key in {"tecnico_asignado", "en_camino", "en_proceso"},
+        "puede_ver_tecnico": tiene_tecnico
+        and estado_key
+        in {
+            "tecnico_asignado",
+            "en_camino",
+            "en_diagnostico",
+            "diagnostico_completado",
+            "cotizacion_emitida",
+            "cotizacion_aceptada",
+            "en_proceso",
+        },
         "puede_ver_cotizacion": puede_ver_cotizacion,
         "puede_responder_cotizacion": puede_responder_cotizacion,
         "puede_pagar": puede_pagar,
@@ -335,14 +353,21 @@ def _serializar_vehiculo(solicitud: Solicitud) -> dict | None:
 def _serializar_taller_tecnico(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
     if not solicitud.asignaciones:
         return None, None
-    asig = solicitud.asignaciones[-1]
+    asig = sorted(
+        solicitud.asignaciones,
+        key=lambda a: (
+            a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
+            a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",
+        ),
+    )[-1]
     taller = None
     tecnico = None
     if asig.taller:
         taller = {
             "id": str(asig.taller.id),
             "nombre": asig.taller.nombre,
-            "estado": asig.estado,
+            # Para cliente mostramos el estado global del servicio, no un estado técnico legado de asignación.
+            "estado": solicitud.estado,
         }
     if asig.tecnico:
         tecnico = {
@@ -391,6 +416,8 @@ def _serializar_cotizacion_pago(solicitud: Solicitud) -> tuple[dict | None, dict
         "id": str(pago.id),
         "estado": pago.estado,
         "monto": cotizacion.monto,
+        "comision_plataforma": pago.comision_plataforma,
+        "monto_taller": pago.monto_taller,
         "metodo": pago.metodo,
         "pagado_en": pago.pagado_en.isoformat() if pago.pagado_en else None,
     }
@@ -408,18 +435,34 @@ def _resolver_resumen_ia(solicitud: Solicitud) -> str | None:
     return None
 
 
+def _tipo_prioridad_actual(solicitud: Solicitud) -> tuple[str | None, int | None]:
+    tipo = None
+    prioridad = None
+    if solicitud.incidente:
+        if solicitud.incidente.tipo:
+            tipo = str(solicitud.incidente.tipo)
+        if solicitud.incidente.prioridad is not None:
+            prioridad = int(solicitud.incidente.prioridad)
+    if not tipo and solicitud.emergencia and solicitud.emergencia.tipo:
+        tipo = str(solicitud.emergencia.tipo)
+    if prioridad is None:
+        prioridad = int(solicitud.prioridad) if solicitud.prioridad is not None else None
+    return tipo, prioridad
+
+
 def listar_solicitudes_cliente(db: Session, *, current_user: Usuario) -> list[dict]:
     _validar_identidad_cliente(current_user)
     solicitudes = listar_solicitudes_para_seguimiento(db, current_user=current_user)
     rows: list[dict] = []
     for s in solicitudes:
+        tipo, prioridad = _tipo_prioridad_actual(s)
         rows.append(
             {
                 "incidente_id": str(s.id),
                 "codigo_solicitud": _codigo_solicitud(s),
                 "estado": str(s.estado),
-                "prioridad": s.prioridad,
-                "tipo": str(s.emergencia.tipo) if s.emergencia and s.emergencia.tipo else (s.incidente.tipo if s.incidente else None),
+                "prioridad": prioridad,
+                "tipo": tipo,
                 "fecha_reporte": s.creado_en.isoformat() if s.creado_en else None,
                 "vehiculo": _serializar_vehiculo(s),
                 "acciones_disponibles": _resolver_acciones_disponibles(s),
@@ -430,6 +473,7 @@ def listar_solicitudes_cliente(db: Session, *, current_user: Usuario) -> list[di
 
 def obtener_detalle_solicitud_cliente(db: Session, *, incidente_id: str, current_user: Usuario) -> dict:
     solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
+    tipo, prioridad = _tipo_prioridad_actual(solicitud)
     taller, tecnico = _serializar_taller_tecnico(solicitud)
     ubicacion = _serializar_ubicacion(solicitud)
     cotizacion, pago = _serializar_cotizacion_pago(solicitud)
@@ -447,8 +491,8 @@ def obtener_detalle_solicitud_cliente(db: Session, *, incidente_id: str, current
         "incidente_id": str(solicitud.id),
         "codigo_solicitud": _codigo_solicitud(solicitud),
         "estado": str(solicitud.estado),
-        "prioridad": solicitud.prioridad,
-        "tipo_problema": str(solicitud.emergencia.tipo) if solicitud.emergencia and solicitud.emergencia.tipo else (solicitud.incidente.tipo if solicitud.incidente else None),
+        "prioridad": prioridad,
+        "tipo_problema": tipo,
         "fecha_reporte": solicitud.creado_en.isoformat() if solicitud.creado_en else None,
         "fecha_actualizacion": solicitud.actualizado_en.isoformat() if solicitud.actualizado_en else None,
         "resumen_ia": _resolver_resumen_ia(solicitud),
@@ -533,6 +577,7 @@ def historial_servicios_cliente(db: Session, *, current_user: Usuario) -> list[d
     )
     out: list[dict] = []
     for s in rows:
+        tipo, _prioridad = _tipo_prioridad_actual(s)
         taller, tecnico = _serializar_taller_tecnico(s)
         vehiculo = _serializar_vehiculo(s)
         cot, pago = _serializar_cotizacion_pago(s)
@@ -545,7 +590,7 @@ def historial_servicios_cliente(db: Session, *, current_user: Usuario) -> list[d
                 "estado_final": str(s.estado),
                 "fecha": s.actualizado_en.isoformat() if s.actualizado_en else (s.creado_en.isoformat() if s.creado_en else None),
                 "vehiculo": vehiculo,
-                "tipo_problema": str(s.emergencia.tipo) if s.emergencia and s.emergencia.tipo else (s.incidente.tipo if s.incidente else None),
+                "tipo_problema": tipo,
                 "taller": taller,
                 "tecnico": tecnico,
                 "resumen_ia": _resolver_resumen_ia(s),

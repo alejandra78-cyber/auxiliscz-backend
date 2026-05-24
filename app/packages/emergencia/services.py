@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import uuid
+from urllib.parse import urlparse
 from pathlib import Path
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
@@ -13,7 +14,7 @@ from app.ai_modules.clasificador import clasificar_incidente
 from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
 from app.core.time import local_now_naive
-from app.models.models import Solicitud, Usuario, Vehiculo
+from app.models.models import Asignacion, Solicitud, Usuario, Vehiculo
 from app.services.notificaciones import enviar_push
 
 from .repository import (
@@ -40,6 +41,7 @@ PRIORIDAD_POR_TIPO = {
     "incierto": 2,
 }
 TIPOS_INCIDENTE_VALIDOS = set(PRIORIDAD_POR_TIPO.keys())
+TIPOS_INCIDENTE_UI = {"bateria", "llanta", "choque", "motor", "otro"}
 DEFAULT_TIPO_IA = "otro"
 DEFAULT_PRIORIDAD_IA = 2
 DEFAULT_RESUMEN_IA = "No se pudo generar el diagnóstico automáticamente"
@@ -97,6 +99,133 @@ def _save_uploaded_bytes(content: bytes, original_name: str | None, kind: str) -
 def _estado_key(value: str | None) -> str:
     raw = (value or "").strip().lower()
     return raw.replace(" ", "_")
+
+
+def _normalizar_tipo_clasificado(value: str | None) -> str:
+    raw = (value or "").strip().lower().replace(" ", "_")
+    alias = {
+        "batería": "bateria",
+        "electrico": "bateria",
+        "eléctrico": "bateria",
+        "arranque_de_emergencia": "bateria",
+        "cambio_de_llanta": "llanta",
+        "pinchazo": "llanta",
+        "grua": "choque",
+        "grúa": "choque",
+        "colision": "choque",
+        "colisión": "choque",
+        "accidente": "choque",
+        "remolque": "choque",
+        "llave": "otro",
+        "incierto": "otro",
+    }
+    mapped = alias.get(raw, raw)
+    if mapped in TIPOS_INCIDENTE_UI:
+        return mapped
+    if mapped in TIPOS_INCIDENTE_VALIDOS:
+        return mapped if mapped != "incierto" else "otro"
+    return "otro"
+
+
+def _prioridad_desde_imagen(analisis: dict) -> int | None:
+    if not isinstance(analisis, dict):
+        return None
+    nivel = str(analisis.get("nivel_danio", "")).strip().lower()
+    if nivel == "grave":
+        return 1
+    if nivel == "moderado":
+        return 2
+    if nivel == "leve":
+        return 3
+    return None
+
+
+def _inferir_choque_por_texto_visual(analisis: dict) -> bool:
+    if not isinstance(analisis, dict):
+        return False
+    texto = " ".join(
+        [
+            str(analisis.get("problema_detectado", "") or ""),
+            str(analisis.get("categoria_probable", "") or ""),
+            str(analisis.get("nivel_danio", "") or ""),
+        ]
+    ).lower()
+    claves_choque = [
+        "choque",
+        "colision",
+        "colisión",
+        "impacto",
+        "frontal",
+        "parachoque",
+        "paragolpe",
+        "capot",
+        "capó",
+        "daño severo",
+        "destroz",
+        "deform",
+    ]
+    return any(k in texto for k in claves_choque)
+
+
+def _inferir_tipo_por_reglas(*, textos: list[str], hay_imagen: bool) -> str | None:
+    base = " ".join([t for t in textos if t]).lower()
+    base = re.sub(r"\s+", " ", base)
+    reglas = [
+        ("choque", ["choque", "colision", "colisión", "accidente", "impacto", "me choc", "chocaron"]),
+        ("motor", ["motor", "humo", "sobrecalent", "refrigerante", "aceite", "no acelera"]),
+        ("bateria", ["bateria", "batería", "no enciende", "sin corriente", "arranque"]),
+        ("llanta", ["llanta", "goma", "neumatico", "neumático", "pinch", "revent"]),
+    ]
+    for tipo, keys in reglas:
+        if any(k in base for k in keys):
+            return tipo
+    # Si hay solo imagen y no hay señales textuales, priorizamos choque como fallback
+    # (caso más común en reportes con daño visible severo).
+    if hay_imagen:
+        return "choque"
+    return None
+
+
+def _resumen_fallback(*, tipo: str, prioridad: int, textos: list[str], hay_audio: bool, hay_imagen: bool) -> str:
+    resumen_txt = " ".join([t.strip() for t in textos if t and t.strip()])[:320]
+    evidencia = []
+    if hay_imagen:
+        evidencia.append("imágenes")
+    if hay_audio:
+        evidencia.append("audio")
+    evidencia_str = ", ".join(evidencia) if evidencia else "texto"
+    return (
+        "Ficha Técnica de Emergencia Vehicular\n"
+        f"Tipo probable: {tipo}\n"
+        f"Prioridad sugerida: {prioridad}\n"
+        f"Evidencia considerada: {evidencia_str}\n"
+        f"Resumen: {resumen_txt or 'Se registró una emergencia y requiere evaluación del taller.'}"
+    )
+
+
+def _read_uploaded_bytes_from_url(url: str | None) -> bytes | None:
+    """
+    Lee bytes de un archivo subido localmente bajo /uploads/emergencias.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+        path = parsed.path or raw
+        marker = "/uploads/emergencias/"
+        if marker not in path:
+            return None
+        filename = path.split(marker, 1)[1].strip("/\\")
+        if not filename:
+            return None
+        local_path = _UPLOADS_DIR / filename
+        if not local_path.exists():
+            return None
+        return local_path.read_bytes()
+    except Exception:
+        logger.exception("No se pudieron leer bytes desde url de evidencia=%s", raw)
+        return None
 
 
 async def transcribir_audio_a_texto(audio_bytes: bytes, idioma: str = "es") -> str:
@@ -168,9 +297,9 @@ async def reportar_emergencia(
             detail="Debes enviar al menos una evidencia (foto/audio) o texto descriptivo",
         )
 
-    tipo_normalizado = (tipo or "otro").strip().lower()
+    tipo_normalizado = (tipo or "incierto").strip().lower()
     if tipo_normalizado not in TIPOS_INCIDENTE_VALIDOS:
-        tipo_normalizado = "otro"
+        tipo_normalizado = "incierto"
 
     solicitud = crear_solicitud_emergencia(
         db,
@@ -203,7 +332,7 @@ async def reportar_emergencia(
                 ensure_ascii=False,
             ),
         )
-        evidencias_datos.append({"tipo": "audio", "texto": ""})
+        evidencias_datos.append({"tipo": "audio", "texto": "", "url_archivo": audio_url})
 
     for foto_file in fotos_recibidas:
         contenido_foto = await foto_file.read()
@@ -221,7 +350,7 @@ async def reportar_emergencia(
                 ensure_ascii=False,
             ),
         )
-        evidencias_datos.append({"tipo": "imagen", "datos": {}})
+        evidencias_datos.append({"tipo": "imagen", "datos": {}, "url_archivo": foto_url})
 
     if descripcion_limpia:
         agregar_evidencia_solicitud(
@@ -236,8 +365,8 @@ async def reportar_emergencia(
     tipo_ia = tipo_normalizado
     prioridad_ia = asignar_nivel_prioridad(tipo_ia)
     confianza_ia = None
-    resumen_ia: str | None = None
-    ia_estado = "pendiente"
+    resumen_ia: str | None = DEFAULT_RESUMEN_IA
+    ia_estado = "procesando"
 
     # Notificación de creación al cliente
     crear_notificacion(
@@ -324,25 +453,128 @@ async def _procesar_asignacion_automatica(
         confianza = 0.7
         if solicitud.emergencia and solicitud.emergencia.tipo:
             tipo = str(solicitud.emergencia.tipo)
-        if evidencias:
-            clasificacion = next((ev for ev in evidencias if ev.get("tipo") == "imagen"), {})
-            if clasificacion:
-                tipo = clasificacion.get("datos", {}).get("categoria_probable", tipo)
-                confianza = float(clasificacion.get("datos", {}).get("confianza", 0.7))
+
+        evidencias_mm: list[dict] = []
+        transcripciones_audio: list[str] = []
+        analisis_imagenes: list[dict] = []
+        textos_libres: list[str] = []
+        hay_audio = False
+        hay_imagen = False
+
+        for link in list(solicitud.evidencias or []):
+            ev = getattr(link, "evidencia", None)
+            if not ev:
+                continue
+
+            metadata = {}
+            try:
+                metadata = json.loads(ev.metadata_json or "{}")
+            except Exception:
+                metadata = {}
+
+            subtipo = str(metadata.get("subtipo") or "").strip().lower()
+            if subtipo in {"clasificacion_ia", "resumen_ia"}:
+                continue
+
+            tipo_ev = str(ev.tipo or "").strip().lower()
+            if tipo_ev == "texto":
+                texto = (ev.contenido_texto or ev.transcripcion or "").strip()
+                if texto:
+                    evidencias_mm.append({"tipo": "texto", "texto": texto})
+                    textos_libres.append(texto)
+                continue
+
+            if tipo_ev == "audio":
+                hay_audio = True
+                texto_audio = (ev.transcripcion or "").strip()
+                if not texto_audio:
+                    audio_bytes = _read_uploaded_bytes_from_url(ev.url_archivo)
+                    if audio_bytes:
+                        try:
+                            texto_audio = (await transcribir_audio_a_texto(audio_bytes, "es")).strip()
+                            ev.transcripcion = texto_audio or ev.transcripcion
+                            ev.contenido_texto = texto_audio or ev.contenido_texto
+                        except Exception:
+                            logger.exception("IA audio: transcripción falló para solicitud=%s", solicitud.id)
+                if texto_audio:
+                    transcripciones_audio.append(texto_audio)
+                    textos_libres.append(texto_audio)
+                evidencias_mm.append({"tipo": "audio", "texto": texto_audio})
+                continue
+
+            if tipo_ev == "imagen":
+                hay_imagen = True
+                datos_img: dict = {}
+                if ev.transcripcion:
+                    try:
+                        parsed = json.loads(ev.transcripcion)
+                        if isinstance(parsed, dict):
+                            datos_img = parsed
+                    except Exception:
+                        datos_img = {}
+                if not datos_img:
+                    img_bytes = _read_uploaded_bytes_from_url(ev.url_archivo)
+                    if img_bytes:
+                        try:
+                            datos_img = await clasificar_incidente_por_imagenes(img_bytes)
+                            ev.transcripcion = json.dumps(datos_img, ensure_ascii=False)
+                        except Exception:
+                            logger.exception("IA imagen: análisis falló para solicitud=%s", solicitud.id)
+                            datos_img = {}
+                if datos_img:
+                    analisis_imagenes.append(datos_img)
+                    textos_libres.extend(
+                        [
+                            str(datos_img.get("problema_detectado", "") or ""),
+                            str(datos_img.get("categoria_probable", "") or ""),
+                            str(datos_img.get("nivel_danio", "") or ""),
+                        ]
+                    )
+                    tipo_img = _normalizar_tipo_clasificado(datos_img.get("categoria_probable", tipo))
+                    conf_img = float(datos_img.get("confianza", confianza))
+                    # La imagen manda cuando tiene confianza razonable.
+                    if conf_img >= 0.60:
+                        tipo = tipo_img
+                    confianza = max(confianza, conf_img)
+                evidencias_mm.append({"tipo": "imagen", "datos": datos_img})
+
+        if not evidencias_mm:
+            evidencias_mm = evidencias
 
         # Clasificación multimodal (texto + audio + imagen)
         try:
-            clasificacion_mm = await clasificar_incidente(evidencias)
+            clasificacion_mm = await clasificar_incidente(evidencias_mm)
             if clasificacion_mm:
-                tipo = str(clasificacion_mm.get("tipo", tipo))
-                confianza = float(clasificacion_mm.get("confianza", confianza))
+                tipo_mm = _normalizar_tipo_clasificado(clasificacion_mm.get("tipo", tipo))
+                conf_mm = float(clasificacion_mm.get("confianza", confianza))
+                # Si no hay imagen concluyente, usamos multimodal.
+                if conf_mm >= 0.45:
+                    tipo = tipo_mm
+                confianza = max(confianza, conf_mm)
         except Exception:
             logger.exception("IA clasificación async falló para solicitud=%s", solicitud.id)
             clasificacion_mm = None
-            tipo = DEFAULT_TIPO_IA
+            # No degradar a "otro" de inmediato; luego aplicamos reglas locales.
             confianza = 0.0
 
+        # Reglas de respaldo cuando IA no clasifica bien.
+        tipo_regla = _inferir_tipo_por_reglas(textos=textos_libres, hay_imagen=hay_imagen)
+        if _normalizar_tipo_clasificado(tipo) in {"otro"} and tipo_regla:
+            tipo = tipo_regla
+        elif (tipo or "").strip().lower() in {"incierto", ""} and tipo_regla:
+            tipo = tipo_regla
+
+        tipo = _normalizar_tipo_clasificado(tipo)
+        # Regla de negocio reforzada: si la visión describe daño de colisión,
+        # priorizamos categoría choque para evitar falsos "otro".
+        if analisis_imagenes and any(_inferir_choque_por_texto_visual(a) for a in analisis_imagenes):
+            tipo = "choque"
         prioridad = asignar_nivel_prioridad(tipo)
+        # Regla global: daño grave visual => prioridad alta.
+        if analisis_imagenes:
+            prioridad_visual = _prioridad_desde_imagen(analisis_imagenes[0])
+            if prioridad_visual is not None:
+                prioridad = min(prioridad, prioridad_visual)
         if solicitud.emergencia:
             solicitud.emergencia.tipo = tipo
             solicitud.emergencia.prioridad = prioridad
@@ -352,7 +584,39 @@ async def _procesar_asignacion_automatica(
             solicitud.incidente.descripcion = solicitud.emergencia.descripcion if solicitud.emergencia else solicitud.incidente.descripcion
             solicitud.incidente.ia_estado = "procesado" if clasificacion_mm else "fallido"
             solicitud.incidente.confianza_ia = confianza
+            solicitud.incidente.transcripcion_audio = (
+                "\n".join(transcripciones_audio).strip() if transcripciones_audio else solicitud.incidente.transcripcion_audio
+            )
+            solicitud.incidente.analisis_imagen = (
+                json.dumps(analisis_imagenes, ensure_ascii=False) if analisis_imagenes else solicitud.incidente.analisis_imagen
+            )
         solicitud.prioridad = prioridad
+
+        # Mantener coherencia CU16/CU14-CU15:
+        # si ya existe asignación activa creada antes de terminar IA,
+        # actualizamos el motivo técnico para reflejar tipo/prioridad finales.
+        try:
+            asignacion_activa = (
+                db.query(Asignacion)
+                .filter(Asignacion.solicitud_id == solicitud.id)
+                .order_by(Asignacion.fecha_asignacion.desc().nullslast(), Asignacion.asignado_en.desc().nullslast())
+                .first()
+            )
+            if asignacion_activa and (asignacion_activa.estado or "").lower() in {
+                "pendiente_respuesta",
+                "asignada",
+                "aceptada",
+                "tecnico_asignado",
+                "en_camino",
+            }:
+                asignacion_activa.motivo_asignacion = (
+                    f"tipo={tipo}; prioridad={prioridad}; "
+                    f"dist={float(asignacion_activa.distancia_km or 0):.2f}km; "
+                    f"estado_ia=procesado"
+                )
+        except Exception:
+            logger.exception("No se pudo sincronizar motivo_asignacion con IA para solicitud=%s", solicitud.id)
+
         agregar_evidencia_solicitud(
             db,
             solicitud=solicitud,
@@ -373,8 +637,16 @@ async def _procesar_asignacion_automatica(
         try:
             resumen = await generar_ficha_resumen_incidente(
                 {"tipo": tipo, "prioridad": prioridad, "confianza": confianza},
-                evidencias,
+                evidencias_mm,
             )
+            if not (resumen or "").strip():
+                resumen = _resumen_fallback(
+                    tipo=tipo,
+                    prioridad=prioridad,
+                    textos=textos_libres,
+                    hay_audio=hay_audio,
+                    hay_imagen=hay_imagen,
+                )
             agregar_evidencia_solicitud(
                 db,
                 solicitud=solicitud,
@@ -388,9 +660,29 @@ async def _procesar_asignacion_automatica(
                 solicitud.incidente.resumen_ia = resumen
         except Exception:
             logger.exception("IA resumen async falló para solicitud=%s", solicitud.id)
+            resumen = _resumen_fallback(
+                tipo=tipo,
+                prioridad=prioridad,
+                textos=textos_libres,
+                hay_audio=hay_audio,
+                hay_imagen=hay_imagen,
+            )
+            agregar_evidencia_solicitud(
+                db,
+                solicitud=solicitud,
+                tipo="texto",
+                transcripcion=resumen,
+                contenido_texto=resumen,
+                metadata_json=json.dumps({"subtipo": "resumen_ia"}, ensure_ascii=False),
+            )
             if solicitud.incidente:
-                solicitud.incidente.resumen_ia = DEFAULT_RESUMEN_IA
-                solicitud.incidente.ia_estado = "fallido"
+                solicitud.incidente.resumen_ia = resumen
+                # Hubo fallback exitoso local, evitamos dejarlo como fallido vacío.
+                solicitud.incidente.ia_estado = "procesado"
+
+        # Persistimos SIEMPRE el resultado IA antes de intentar CU16 nuevamente.
+        # Esto evita perder tipo/prioridad/resumen cuando CU16 devuelve "asignación activa".
+        db.commit()
 
         # CU16: asignación inteligente automática posterior al reporte/clasificación.
         # Se crea asignación pendiente_respuesta para que el taller la evalúe en CU15.
@@ -407,7 +699,7 @@ async def _procesar_asignacion_automatica(
             )
         except HTTPException as exc:
             if exc.status_code == 400 and "asignación activa" in (exc.detail or "").lower():
-                db.rollback()
+                # La IA ya quedó guardada arriba; no hacemos rollback para no perderla.
                 return
             db.rollback()
             solicitud = obtener_solicitud_por_id_o_incidente(db, solicitud_id)
@@ -482,7 +774,69 @@ def enviar_ubicacion_gps(
     if not _puede_ver_solicitud(solicitud, current_user):
         raise HTTPException(status_code=403, detail="No autorizado para actualizar ubicación")
     actualizar_ubicacion_solicitud(db, solicitud=solicitud, lat=lat, lng=lng)
+    # Reintento automático de asignación SOLO en etapas tempranas del flujo.
+    # Evita reabrir/reasignar servicios que ya están en atención, pago o cerrados.
+    estado_sol = _estado_key(solicitud.estado)
+    estados_cerrados = {
+        "cancelada",
+        "cancelado",
+        "finalizado",
+        "completada",
+        "completado",
+        "pagado",
+    }
+    estados_reintento_asignacion = {
+        "pendiente",
+        "buscando_taller",
+        "pendiente_asignacion",
+        "sin_taller_disponible",
+        "en_revision",
+        "en_evaluacion",
+    }
+    estados_asig_activa = {
+        "pendiente_respuesta",
+        "aceptada",
+        "tecnico_asignado",
+        "en_camino",
+        "en_diagnostico",
+        "diagnostico_completado",
+        "en_proceso",
+        "atendido",
+        "esperando_pago",
+        "pagado",
+        "finalizado",
+    }
+    tiene_asignacion_activa = any(
+        _estado_key(getattr(a, "estado", None)) in estados_asig_activa for a in (solicitud.asignaciones or [])
+    )
+
     db.commit()
+
+    # Si ya hubo asignaciones históricas, no relanzar CU16 desde cliente.
+    if estado_sol in estados_reintento_asignacion and not tiene_asignacion_activa and not (solicitud.asignaciones or []):
+        tipo_incidente = (solicitud.incidente.tipo if solicitud.incidente and solicitud.incidente.tipo else None)
+        prioridad_incidente = (
+            int(solicitud.incidente.prioridad)
+            if solicitud.incidente and solicitud.incidente.prioridad is not None
+            else int(solicitud.prioridad or 2)
+        )
+        try:
+            from app.packages.asignacion.services import asignar_taller_automaticamente
+            import asyncio
+
+            asyncio.run(
+                asignar_taller_automaticamente(
+                    db,
+                    solicitud_id=str(solicitud.id),
+                    lat=float(lat),
+                    lng=float(lng),
+                    tipo=tipo_incidente,
+                    prioridad=prioridad_incidente,
+                )
+            )
+        except Exception:
+            logger.exception("Reintento CU16 por actualización de ubicación falló para solicitud=%s", solicitud.id)
+
     db.refresh(solicitud)
     return solicitud
 

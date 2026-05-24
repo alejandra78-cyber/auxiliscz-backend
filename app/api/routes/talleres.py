@@ -1864,17 +1864,6 @@ def completar_servicio(
         solicitud.emergencia.estado = "esperando_pago"
     if solicitud.incidente:
         solicitud.incidente.estado = "esperando_pago"
-    if solicitud.cliente:
-        db.add(
-            Historial(
-                id=uuid.uuid4(),
-                solicitud_id=solicitud.id,
-                incidente_id=solicitud.incidente_id,
-                estado_anterior=solicitud.estado,
-                estado_nuevo=solicitud.estado,
-                comentario="Notificación de completado enviada al cliente",
-            )
-        )
     db.add(solicitud)
     if solicitud.cliente:
         db.add(
@@ -1920,7 +1909,22 @@ def listar_servicios_activos(
             joinedload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
         )
         .join(Asignacion, Asignacion.solicitud_id == Solicitud.id)
-        .filter(Solicitud.estado.in_(["aceptada", "tecnico_asignado", "en_camino", "en_proceso", "asignada"]))
+        .filter(
+            Solicitud.estado.in_(
+                [
+                    "aceptada",
+                    "tecnico_asignado",
+                    "en_camino",
+                    "en_diagnostico",
+                    "diagnostico_completado",
+                    "cotizacion_emitida",
+                    "cotizacion_aceptada",
+                    "en_proceso",
+                    "atendido",
+                    "asignada",
+                ]
+            )
+        )
         .order_by(Solicitud.actualizado_en.desc())
     )
     if current_user.rol in {"taller", "admin"} and taller:

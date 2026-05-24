@@ -31,6 +31,21 @@ from .services import (
 router = APIRouter()
 
 
+def _tipo_prioridad_actual(solicitud):
+    tipo = None
+    prioridad = None
+    if getattr(solicitud, "incidente", None):
+        if solicitud.incidente.tipo:
+            tipo = str(solicitud.incidente.tipo)
+        if solicitud.incidente.prioridad is not None:
+            prioridad = int(solicitud.incidente.prioridad)
+    if not tipo and getattr(solicitud, "emergencia", None) and solicitud.emergencia.tipo:
+        tipo = str(solicitud.emergencia.tipo)
+    if prioridad is None:
+        prioridad = int(solicitud.prioridad) if solicitud.prioridad is not None else None
+    return tipo, prioridad
+
+
 @router.post("/reportar", response_model=ReportarEmergenciaOut)
 async def reportar_emergencia_endpoint(
     background_tasks: BackgroundTasks,
@@ -102,13 +117,14 @@ def consultar_estado_solicitud_endpoint(
                     break
             except Exception:
                 pass
+    tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudOut(
         incidente_id=str(solicitud.id),
         estado=str(solicitud.estado),
         es_cancelable=solicitud_es_cancelable(solicitud),
         fecha_actualizacion=solicitud.actualizado_en.isoformat() if solicitud.actualizado_en else None,
-        prioridad=solicitud.prioridad,
-        tipo=str(solicitud.emergencia.tipo) if solicitud.emergencia and solicitud.emergencia.tipo else None,
+        prioridad=prioridad,
+        tipo=tipo,
         resumen_ia=resumen_ia,
         taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
         taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,

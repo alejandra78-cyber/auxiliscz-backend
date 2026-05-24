@@ -27,6 +27,7 @@ class Usuario(Base):
     auditorias = relationship("Auditoria", back_populates="usuario")
     mensajes = relationship("Mensaje", back_populates="usuario")
     password_reset_tokens = relationship("PasswordResetToken", back_populates="usuario")
+    dispositivos_push = relationship("DispositivoPush", back_populates="usuario")
 
     @property
     def rol(self) -> str:
@@ -578,6 +579,20 @@ class Mensaje(Base):
     solicitud = relationship("Solicitud", back_populates="mensajes")
     incidente = relationship("Incidente", back_populates="mensajes")
     usuario = relationship("Usuario", back_populates="mensajes")
+
+
+class DispositivoPush(Base):
+    __tablename__ = "dispositivos_push"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False, index=True)
+    token = Column(String(512), nullable=False, unique=True, index=True)
+    plataforma = Column(String(30), default="unknown")
+    activo = Column(Boolean, default=True, nullable=False)
+    creado_en = Column(DateTime, default=local_now_naive)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
+
+    usuario = relationship("Usuario", back_populates="dispositivos_push")
 
 
 class Metrica(Base):

@@ -66,6 +66,8 @@ ESTADOS_CU17_VALIDOS = {
     "en_camino",
     "en_diagnostico",
     "diagnostico_completado",
+    "cotizacion_emitida",
+    "cotizacion_aceptada",
     "en_proceso",
     "atendido",
     "finalizado",
@@ -83,7 +85,9 @@ TRANSICIONES_CU17: dict[str, set[str]] = {
     # Compatibilidad: permite ir directo a en_proceso o pasar por diagnóstico.
     "en_camino": {"en_diagnostico", "en_proceso", "cancelado"},
     "en_diagnostico": {"diagnostico_completado", "cancelado"},
-    "diagnostico_completado": {"en_proceso", "cancelado"},
+    "diagnostico_completado": {"cotizacion_emitida", "cotizacion_aceptada", "en_proceso", "cancelado"},
+    "cotizacion_emitida": {"cotizacion_aceptada", "cancelado"},
+    "cotizacion_aceptada": {"en_proceso", "cancelado"},
     "en_proceso": {"atendido", "cancelado"},
     "atendido": {"finalizado"},
     "finalizado": set(),
@@ -96,6 +100,8 @@ ESTADOS_ASIGNACION_ACTIVA_CU17 = {
     "en_camino",
     "en_diagnostico",
     "diagnostico_completado",
+    "cotizacion_emitida",
+    "cotizacion_aceptada",
     "en_proceso",
 }
 
@@ -554,9 +560,32 @@ async def asignar_taller_automaticamente(
     candidato = candidatos[0]
     taller_id = candidato.get("taller_id")
     if not taller_id:
+        _marcar_sin_taller_disponible(
+            db,
+            solicitud,
+            "Motor de asignación devolvió candidato sin taller_id",
+        )
+        db.commit()
         return None
-    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+
+    # Robustez: evitamos fallos silenciosos por desajustes UUID/string.
+    taller = None
+    try:
+        taller_uuid = uuid.UUID(str(taller_id))
+        taller = db.query(Taller).filter(Taller.id == taller_uuid).first()
+    except Exception:
+        taller = None
+
     if not taller:
+        taller = next((t for t in db.query(Taller).all() if str(t.id) == str(taller_id)), None)
+
+    if not taller:
+        _marcar_sin_taller_disponible(
+            db,
+            solicitud,
+            f"No se pudo resolver el taller candidato ({taller_id})",
+        )
+        db.commit()
         return None
     db.add(
         Asignacion(
@@ -644,16 +673,31 @@ async def reasignar_taller(
     ultimo_taller = str(ultima.taller_id) if ultima and ultima.taller_id else None
     candidato = next((c for c in candidatos if str(c.get("taller_id")) != ultimo_taller), None)
     if not candidato:
-        _marcar_sin_taller_disponible(db, solicitud, "No hay candidatos alternativos para reasignación")
+        # Si no existe alternativo, reutilizamos el mejor candidato disponible.
+        # Evita dejar la solicitud sin asignar cuando solo hay 1 taller elegible.
+        candidato = candidatos[0]
+    nuevo_taller = None
+    try:
+        nuevo_taller_uuid = uuid.UUID(str(candidato["taller_id"]))
+        nuevo_taller = db.query(Taller).filter(Taller.id == nuevo_taller_uuid).first()
+    except Exception:
+        nuevo_taller = None
+    if not nuevo_taller:
+        nuevo_taller = next((t for t in db.query(Taller).all() if str(t.id) == str(candidato["taller_id"])), None)
+    if not nuevo_taller:
+        _marcar_sin_taller_disponible(
+            db,
+            solicitud,
+            f"No se pudo resolver el taller de reasignación ({candidato.get('taller_id')})",
+        )
         db.commit()
         return None
-    nuevo_taller = db.query(Taller).filter(Taller.id == candidato["taller_id"]).first()
     db.add(
         Asignacion(
             id=uuid.uuid4(),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
-            taller_id=candidato["taller_id"],
+            taller_id=nuevo_taller.id,
             tecnico_id=None,
             fecha_asignacion=local_now_naive(),
             distancia_km=float(candidato.get("distancia_km", 0) or 0),
@@ -701,8 +745,8 @@ def listar_solicitudes_servicio(
     fecha_hasta: str | None = None,
     taller_id: str | None = None,
 ) -> list[Solicitud]:
-    if current_user.rol not in {"taller", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo taller/admin puede consultar solicitudes")
+    if current_user.rol not in {"taller", "admin", "tecnico"}:
+        raise HTTPException(status_code=403, detail="Solo taller/admin/tecnico puede consultar solicitudes")
     fecha_desde_dt = _parse_fecha_iso(fecha_desde, end_of_day=False)
     fecha_hasta_dt = _parse_fecha_iso(fecha_hasta, end_of_day=True)
     if fecha_desde_dt and fecha_hasta_dt and fecha_desde_dt > fecha_hasta_dt:
@@ -719,6 +763,10 @@ def listar_solicitudes_servicio(
         "aceptada",
         "tecnico_asignado",
         "en_camino",
+        "en_diagnostico",
+        "diagnostico_completado",
+        "cotizacion_emitida",
+        "cotizacion_aceptada",
         "en_proceso",
         "atendido",
         "finalizado",
@@ -741,6 +789,11 @@ def listar_solicitudes_servicio(
         if not mi_taller:
             raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
         q = q.join(Asignacion, Asignacion.solicitud_id == Solicitud.id).filter(Asignacion.taller_id == mi_taller.id)
+    elif current_user.rol == "tecnico":
+        mi_tecnico = _obtener_tecnico_de_usuario(db, current_user)
+        if not mi_tecnico:
+            raise HTTPException(status_code=403, detail="No existe perfil técnico asociado a este usuario")
+        q = q.join(Asignacion, Asignacion.solicitud_id == Solicitud.id).filter(Asignacion.tecnico_id == mi_tecnico.id)
     elif current_user.rol == "admin" and taller_id:
         q = q.join(Asignacion, Asignacion.solicitud_id == Solicitud.id).filter(Asignacion.taller_id == taller_id)
     if estado_norm:
@@ -764,8 +817,8 @@ def obtener_detalle_solicitud_servicio(
     incidente_id: str,
     current_user: Usuario,
 ) -> Solicitud:
-    if current_user.rol not in {"taller", "admin"}:
-        raise HTTPException(status_code=403, detail="Solo taller/admin puede consultar detalle de solicitudes")
+    if current_user.rol not in {"taller", "admin", "tecnico"}:
+        raise HTTPException(status_code=403, detail="Solo taller/admin/tecnico puede consultar detalle de solicitudes")
     solicitud = _resolver_solicitud(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
@@ -775,6 +828,13 @@ def obtener_detalle_solicitud_servicio(
             raise HTTPException(status_code=403, detail="El usuario taller no tiene perfil de taller")
         asignacion_taller = next((a for a in solicitud.asignaciones if str(a.taller_id) == str(mi_taller.id)), None)
         if not asignacion_taller:
+            raise HTTPException(status_code=403, detail="No autorizado para consultar esta solicitud")
+    elif current_user.rol == "tecnico":
+        mi_tecnico = _obtener_tecnico_de_usuario(db, current_user)
+        if not mi_tecnico:
+            raise HTTPException(status_code=403, detail="No existe perfil técnico asociado a este usuario")
+        asignacion_tecnico = next((a for a in solicitud.asignaciones if str(a.tecnico_id or "") == str(mi_tecnico.id)), None)
+        if not asignacion_tecnico:
             raise HTTPException(status_code=403, detail="No autorizado para consultar esta solicitud")
     return solicitud
 
@@ -1190,3 +1250,123 @@ def actualizar_estado_servicio(
     db.commit()
     db.refresh(solicitud)
     return solicitud
+
+
+ACCIONES_OPERATIVAS_CU17 = {
+    "aceptar_solicitud",
+    "rechazar_solicitud",
+    "asignar_tecnico",
+    "iniciar_ruta",
+    "llegue_al_lugar",
+    "completar_diagnostico",
+    "iniciar_atencion",
+    "generar_cotizacion",
+    "finalizar_servicio",
+}
+
+
+def ejecutar_accion_operativa_servicio(
+    db: Session,
+    *,
+    incidente_id: str,
+    current_user: Usuario,
+    accion: str,
+    observacion: str | None = None,
+    tecnico_id: str | None = None,
+    servicio: str | None = None,
+) -> Solicitud:
+    a = (accion or "").strip().lower()
+    if a not in ACCIONES_OPERATIVAS_CU17:
+        raise HTTPException(status_code=400, detail="Acción operativa no válida")
+
+    if a == "aceptar_solicitud":
+        return evaluar_solicitud_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            aprobar=True,
+            observacion=observacion,
+        )
+
+    if a == "rechazar_solicitud":
+        return evaluar_solicitud_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            aprobar=False,
+            observacion=observacion or "Rechazo operativo desde CU17",
+        )
+
+    if a == "asignar_tecnico":
+        if not tecnico_id:
+            raise HTTPException(status_code=400, detail="Para asignar técnico debes seleccionar un técnico")
+        servicio_final = (servicio or "").strip().lower().replace(" ", "_") or "diagnostico"
+        return asignar_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            tecnico_id=tecnico_id,
+            servicio=servicio_final,
+            taller_id=None,
+            observacion=observacion or "Asignación operativa de técnico",
+        )
+
+    if a == "iniciar_ruta":
+        return actualizar_estado_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            estado="en_camino",
+            observacion=observacion or "Técnico en ruta",
+            tecnico_id=tecnico_id,
+        )
+
+    if a == "llegue_al_lugar":
+        return actualizar_estado_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            estado="en_diagnostico",
+            observacion=observacion or "Técnico llegó al lugar",
+            tecnico_id=tecnico_id,
+        )
+
+    if a == "completar_diagnostico":
+        return actualizar_estado_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            estado="diagnostico_completado",
+            observacion=observacion or "Diagnóstico completado",
+            tecnico_id=tecnico_id,
+        )
+
+    if a == "iniciar_atencion":
+        return actualizar_estado_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            estado="en_proceso",
+            observacion=observacion or "Atención iniciada",
+            tecnico_id=tecnico_id,
+        )
+
+    if a == "generar_cotizacion":
+        return actualizar_estado_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            estado="diagnostico_completado",
+            observacion=observacion or "Diagnóstico completado, listo para cotización",
+            tecnico_id=tecnico_id,
+        )
+
+    # finalizar_servicio
+    return actualizar_estado_servicio(
+        db,
+        incidente_id=incidente_id,
+        current_user=current_user,
+        estado="atendido",
+        observacion=observacion or "Servicio finalizado operativamente",
+        tecnico_id=tecnico_id,
+    )

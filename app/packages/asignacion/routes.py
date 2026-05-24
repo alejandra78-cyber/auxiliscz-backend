@@ -28,6 +28,7 @@ from .services import (
     codigo_solicitud,
     evaluar_solicitud_servicio,
     estado_paquete_asignacion,
+    ejecutar_accion_operativa_servicio,
     listar_servicios_catalogo,
     listar_solicitudes_servicio,
     listar_candidatos_para_solicitud,
@@ -88,15 +89,28 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
         last = sorted(i.emergencia.ubicaciones, key=lambda u: u.registrado_en or u.id)[-1]
         latitud = float(last.latitud) if last.latitud is not None else None
         longitud = float(last.longitud) if last.longitud is not None else None
+
+    tipo_actual = None
+    prioridad_actual = None
+    if getattr(i, "incidente", None):
+        if i.incidente.tipo:
+            tipo_actual = str(i.incidente.tipo)
+        if i.incidente.prioridad is not None:
+            prioridad_actual = int(i.incidente.prioridad)
+    if not tipo_actual and i.emergencia and i.emergencia.tipo:
+        tipo_actual = str(i.emergencia.tipo)
+    if prioridad_actual is None:
+        prioridad_actual = i.prioridad
+
     return SolicitudServicioOut(
         id=str(i.id),
         codigo_solicitud=codigo_solicitud(i),
         estado=str(i.estado),
-        tipo=str(i.emergencia.tipo) if i.emergencia else None,
-        tipo_sugerido_ia=str(i.emergencia.tipo) if i.emergencia else None,
+        tipo=tipo_actual,
+        tipo_sugerido_ia=tipo_actual,
         descripcion=str(i.emergencia.descripcion) if i.emergencia and i.emergencia.descripcion else None,
-        prioridad=i.prioridad,
-        prioridad_sugerida_ia=i.prioridad,
+        prioridad=prioridad_actual,
+        prioridad_sugerida_ia=prioridad_actual,
         resumen_ia=resumen_ia,
         cliente_nombre=i.cliente.usuario.nombre if i.cliente and i.cliente.usuario else None,
         vehiculo_id=str(i.vehiculo_id) if i.vehiculo_id else None,
@@ -358,12 +372,25 @@ def actualizar_estado_endpoint(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    i = actualizar_estado_servicio(
-        db,
-        incidente_id=incidente_id,
-        current_user=current_user,
-        estado=payload.estado,
-        observacion=payload.observacion,
-        tecnico_id=payload.tecnico_id,
-    )
+    if (payload.accion or "").strip():
+        i = ejecutar_accion_operativa_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            accion=payload.accion or "",
+            observacion=payload.observacion,
+            tecnico_id=payload.tecnico_id,
+            servicio=payload.servicio,
+        )
+    else:
+        if not (payload.estado or "").strip():
+            raise HTTPException(status_code=400, detail="Debes enviar accion o estado")
+        i = actualizar_estado_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            estado=payload.estado or "",
+            observacion=payload.observacion,
+            tecnico_id=payload.tecnico_id,
+        )
     return _to_solicitud_out(i)

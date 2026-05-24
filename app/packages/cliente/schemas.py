@@ -128,6 +128,8 @@ class PagoActualOut(BaseModel):
     id: str
     estado: str
     monto: float | None = None
+    comision_plataforma: float | None = None
+    monto_taller: float | None = None
     metodo: str | None = None
     pagado_en: str | None = None
 

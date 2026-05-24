@@ -65,6 +65,25 @@ def _normalizar_servicio(raw: str | None) -> str:
 
 
 def _servicios_taller(taller: Taller) -> list[str]:
+    # 1) Fuente principal nueva: relación normalizada taller_servicios -> servicios
+    servicios_rel = []
+    try:
+        for s in (getattr(taller, "servicios_rel", None) or []):
+            codigo = _normalizar_servicio(getattr(s, "codigo", None))
+            if codigo:
+                servicios_rel.append(codigo)
+        for ts in (getattr(taller, "taller_servicios", None) or []):
+            srv = getattr(ts, "servicio", None)
+            codigo = _normalizar_servicio(getattr(srv, "codigo", None) if srv else None)
+            if codigo:
+                servicios_rel.append(codigo)
+    except Exception:
+        servicios_rel = []
+
+    if servicios_rel:
+        return sorted(set(servicios_rel))
+
+    # 2) Compatibilidad legado: columna de texto/json
     raw = taller.servicios
     if not raw:
         return []
@@ -80,8 +99,9 @@ def _servicios_taller(taller: Taller) -> list[str]:
 
 def _servicio_compatible(taller: Taller, tipo: str) -> bool:
     servicios_taller = _servicios_taller(taller)
+    # Si el taller no configuró servicios aún, no bloqueamos la asignación automática.
     if not servicios_taller:
-        return False
+        return True
     # Si IA no puede clasificar con precisión, no bloqueamos por servicio exacto.
     if _normalizar_tipo(tipo) in {"otro", "incierto"}:
         return True
@@ -158,6 +178,7 @@ def _es_taller_elegible(
     distancia_km: float,
     *,
     exigir_aprobado: bool = True,
+    relajar_filtros: bool = False,
 ) -> tuple[bool, str]:
     estado_aprobacion = (getattr(taller, "estado_aprobacion", "pendiente") or "pendiente").strip().lower()
     if exigir_aprobado and estado_aprobacion != "aprobado":
@@ -166,19 +187,21 @@ def _es_taller_elegible(
     estado_operativo = (getattr(taller, "estado_operativo", "disponible") or "disponible").strip().lower()
     if estado_operativo in ESTADOS_OPERATIVOS_NO_DISPONIBLES:
         return False, f"estado_operativo={estado_operativo}"
-    if not taller.disponible:
+    disponible_flag = True if getattr(taller, "disponible", True) is None else bool(getattr(taller, "disponible", True))
+    if not disponible_flag:
         return False, "taller_no_disponible"
 
-    capacidad_disponible, _ = _capacidad_disponible(db, taller)
-    if capacidad_disponible <= 0:
-        return False, "sin_capacidad_disponible"
+    if not relajar_filtros:
+        capacidad_disponible, _ = _capacidad_disponible(db, taller)
+        if capacidad_disponible <= 0:
+            return False, "sin_capacidad_disponible"
 
     radio_taller = float(getattr(taller, "radio_cobertura_km", 10) or 10)
     radio_efectivo = max(1.0, min(RADIO_BUSQUEDA_KM, radio_taller))
     if distancia_km > radio_efectivo:
         return False, f"fuera_radio({distancia_km:.2f}>{radio_efectivo:.2f})"
 
-    if not _servicio_compatible(taller, tipo):
+    if not relajar_filtros and not _servicio_compatible(taller, tipo):
         return False, "sin_cobertura_servicio"
 
     return True, "ok"
@@ -199,13 +222,20 @@ async def motor_asignacion(
     prioridad = int(prioridad or 2)
     todos_talleres = db.query(Taller).all()
 
-    def _candidatos(exigir_aprobado: bool) -> list[tuple[float, float, Taller]]:
+    def _candidatos(exigir_aprobado: bool, *, relajar_filtros: bool = False) -> list[tuple[float, float, Taller]]:
         rows: list[tuple[float, float, Taller]] = []
         for taller in todos_talleres:
             if not (taller.latitud and taller.longitud):
                 continue
             distancia = haversine(lat, lng, taller.latitud, taller.longitud)
-            es_elegible, _ = _es_taller_elegible(db, taller, tipo, distancia, exigir_aprobado=exigir_aprobado)
+            es_elegible, _ = _es_taller_elegible(
+                db,
+                taller,
+                tipo,
+                distancia,
+                exigir_aprobado=exigir_aprobado,
+                relajar_filtros=relajar_filtros,
+            )
             if not es_elegible:
                 continue
             puntaje = calcular_puntaje(taller, distancia, tipo, prioridad)
@@ -218,6 +248,9 @@ async def motor_asignacion(
     if not candidatos:
         # Fallback operativo: permite asignación en ambientes donde aún no se aprobó el taller
         candidatos = _candidatos(exigir_aprobado=False)
+    if not candidatos:
+        # Último fallback: evita perder la solicitud por filtros estrictos.
+        candidatos = _candidatos(exigir_aprobado=False, relajar_filtros=True)
 
     if not candidatos:
         return None
@@ -239,7 +272,7 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
     todos_talleres = db.query(Taller).all()
     resultado = []
 
-    def _append_candidatos(*, exigir_aprobado: bool) -> None:
+    def _append_candidatos(*, exigir_aprobado: bool, relajar_filtros: bool = False) -> None:
         for taller in todos_talleres:
             if not (taller.latitud and taller.longitud):
                 continue
@@ -250,6 +283,7 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
                 tipo,
                 distancia,
                 exigir_aprobado=exigir_aprobado,
+                relajar_filtros=relajar_filtros,
             )
             if not es_elegible:
                 continue
@@ -274,7 +308,7 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
                     f"tipo={tipo}; prioridad={prioridad}; dist={distancia:.2f}km; "
                     f"capacidad_disponible={capacidad_disponible}; tecnicos_disponibles={tecnicos_disponibles}; "
                     f"estado={(getattr(taller, 'estado_operativo', 'disponible') or 'disponible')}; "
-                    f"aprobacion={estado_aprobacion}"
+                    f"aprobacion={estado_aprobacion}; relajar_filtros={relajar_filtros}"
                 ),
                 "motivo_exclusion": motivo_exclusion if motivo_exclusion != "ok" else None,
             })
@@ -283,6 +317,9 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
     if not resultado:
         # Fallback operativo: evita dejar solicitudes sin asignar en ambientes de pruebas
         _append_candidatos(exigir_aprobado=False)
+    if not resultado:
+        # Último fallback: candidatos por cercanía/disponibilidad básica.
+        _append_candidatos(exigir_aprobado=False, relajar_filtros=True)
 
     resultado.sort(key=lambda x: x["puntaje"], reverse=True)
     return resultado
