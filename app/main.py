@@ -16,6 +16,7 @@ from .packages.auth.routes import router as auth_router
 from .packages.pagos.routes import router as pagos_router
 from .packages.taller.routes import router as taller_router
 from .packages.tecnico.routes import router as tecnico_router
+from .packages.tenant.routes import router as tenant_router
 from .core.database import engine, Base
 
 
@@ -43,6 +44,91 @@ def _ensure_incremental_schema() -> None:
     with engine.begin() as conn:
         inspector = inspect(conn)
         tables = set(inspector.get_table_names())
+        is_pg = conn.dialect.name == "postgresql"
+        guid_sql = "UUID" if is_pg else "CHAR(36)"
+        now_sql = "NOW()" if is_pg else "CURRENT_TIMESTAMP"
+        default_tenant_id = "00000000-0000-4000-8000-000000000001"
+
+        if "tenants" not in tables:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS tenants (
+                        id {guid_sql} PRIMARY KEY,
+                        codigo VARCHAR(80) UNIQUE NOT NULL,
+                        nombre VARCHAR(150) NOT NULL,
+                        descripcion TEXT,
+                        estado VARCHAR(30) NOT NULL DEFAULT 'activo',
+                        contacto_email VARCHAR(150),
+                        contacto_telefono VARCHAR(30),
+                        creado_en TIMESTAMP DEFAULT {now_sql},
+                        actualizado_en TIMESTAMP DEFAULT {now_sql}
+                    )
+                    """
+                )
+            )
+            tables.add("tenants")
+
+        conn.execute(
+            text(
+                f"""
+                INSERT INTO tenants (id, codigo, nombre, descripcion, estado, creado_en, actualizado_en)
+                VALUES (:id, 'auxiliscz', 'AuxilioSCZ', 'Tenant por defecto para datos existentes', 'activo', {now_sql}, {now_sql})
+                """
+                + (
+                    " ON CONFLICT (codigo) DO NOTHING"
+                    if is_pg
+                    else " ON CONFLICT(codigo) DO NOTHING"
+                )
+            ),
+            {"id": default_tenant_id},
+        )
+        tenant_cols = {c["name"] for c in inspector.get_columns("tenants")}
+        if "taller_id" not in tenant_cols:
+            conn.execute(text(f"ALTER TABLE tenants ADD COLUMN taller_id {guid_sql}"))
+        if is_pg:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_tenants_taller_id ON tenants(taller_id) WHERE taller_id IS NOT NULL"))
+
+        tenant_tables = [
+            "usuarios",
+            "clientes",
+            "solicitudes_taller",
+            "talleres",
+            "tecnicos",
+            "vehiculos",
+            "incidentes",
+            "solicitudes",
+            "emergencias",
+            "ubicaciones",
+            "asignaciones",
+            "evaluaciones",
+            "trabajos_completados",
+            "pagos",
+            "cotizaciones",
+            "historial",
+            "evidencias",
+            "notificaciones",
+            "mensajes",
+            "metricas",
+            "auditorias",
+        ]
+        for table_name in tenant_tables:
+            if table_name not in tables:
+                continue
+            cols = {c["name"] for c in inspector.get_columns(table_name)}
+            if "tenant_id" not in cols:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN tenant_id {guid_sql}"))
+            if is_pg:
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_tenant_id ON {table_name}(tenant_id)"))
+
+        # CU29: los clientes son externos al tenant; sus vehiculos tampoco quedan
+        # asociados permanentemente a un taller/empresa.
+        if "clientes" in tables:
+            conn.execute(text("UPDATE clientes SET tenant_id = NULL"))
+        if "vehiculos" in tables:
+            conn.execute(text("UPDATE vehiculos SET tenant_id = NULL"))
+        if "usuarios" in tables and "clientes" in tables:
+            conn.execute(text("UPDATE usuarios SET tenant_id = NULL WHERE id IN (SELECT usuario_id FROM clientes)"))
 
         if "incidentes" not in tables:
             if conn.dialect.name == "postgresql":
@@ -946,6 +1032,7 @@ app.include_router(asignacion_router,  prefix="/api/asignaciones", tags=["Asigna
 app.include_router(pagos_router,       prefix="/api/pagos",       tags=["Pagos"])
 app.include_router(admin_router,       prefix="/api/admin",       tags=["Admin"])
 app.include_router(tecnico_router,     prefix="/api/tecnico",     tags=["Técnico"])
+app.include_router(tenant_router,      prefix="/api/tenants",     tags=["Tenants"])
 
 app.include_router(websocket.router,   prefix="/api/ws",          tags=["WebSocket"])
 

@@ -22,6 +22,7 @@ def crear_usuario(
     rol: str,
 ) -> Usuario:
     usuario = Usuario(
+        tenant_id=None,
         nombre=nombre,
         email=email,
         password_hash=password_hash,
@@ -38,7 +39,7 @@ def crear_usuario(
     if rol == "conductor":
         cliente_existente = db.query(Cliente).filter(Cliente.usuario_id == usuario.id).first()
         if not cliente_existente:
-            db.add(Cliente(usuario_id=usuario.id))
+            db.add(Cliente(usuario_id=usuario.id, tenant_id=None))
     db.commit()
     db.refresh(usuario)
     return usuario

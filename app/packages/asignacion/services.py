@@ -26,6 +26,7 @@ from app.models.models import (
 )
 from app.services.asignacion import listar_candidatos
 from app.core.time import local_now_naive
+from app.core.tenant import assert_same_tenant, stamp_tenant, tenant_id_from
 
 from .schemas import AsignacionDemoOut
 
@@ -189,7 +190,16 @@ def _obtener_candidatos_para_solicitud(db: Session, solicitud: Solicitud) -> lis
     if lat is None or lng is None:
         raise HTTPException(status_code=400, detail="La solicitud no tiene ubicación para asignación")
     tipo, prioridad = _tipo_prioridad_para_asignacion(solicitud)
-    return asyncio.run(listar_candidatos(db, lat=lat, lng=lng, tipo=tipo, prioridad=prioridad))
+    return asyncio.run(
+        listar_candidatos(
+            db,
+            lat=lat,
+            lng=lng,
+            tipo=tipo,
+            prioridad=prioridad,
+            tenant_id=tenant_id_from(solicitud),
+        )
+    )
 
 
 def _marcar_sin_taller_disponible(db: Session, solicitud: Solicitud, comentario: str) -> None:
@@ -270,6 +280,7 @@ def _guardar_historial(db: Session, solicitud: Solicitud, anterior: str | None, 
     db.add(
         Historial(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             estado_anterior=anterior,
@@ -296,6 +307,7 @@ def _crear_notificacion_evento(
     db.add(
         Notificacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud),
             usuario_id=usuario_id,
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
@@ -309,6 +321,7 @@ def _crear_notificacion_evento(
 
 def _incrementar_metrica_taller(db: Session, *, taller_id, codigo: str, delta: float = 1.0) -> None:
     periodo = local_now_naive().strftime("%Y-%m")
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
     row = (
         db.query(Metrica)
         .filter(Metrica.taller_id == taller_id, Metrica.codigo == codigo, Metrica.periodo == periodo)
@@ -320,6 +333,7 @@ def _incrementar_metrica_taller(db: Session, *, taller_id, codigo: str, delta: f
         db.add(
             Metrica(
                 id=uuid.uuid4(),
+                tenant_id=tenant_id_from(taller),
                 taller_id=taller_id,
                 codigo=codigo,
                 valor=delta,
@@ -552,6 +566,7 @@ async def asignar_taller_automaticamente(
         lng=float(lng_calc),
         tipo=tipo_calc,
         prioridad=prioridad_calc,
+        tenant_id=None,
     )
     if not candidatos:
         _marcar_sin_taller_disponible(db, solicitud, "No hay talleres candidatos para asignación automática")
@@ -587,9 +602,16 @@ async def asignar_taller_automaticamente(
         )
         db.commit()
         return None
+    tenant_asignacion = getattr(taller, "tenant_id", None)
+    solicitud.tenant_id = tenant_asignacion
+    if solicitud.incidente:
+        solicitud.incidente.tenant_id = tenant_asignacion
+    if solicitud.emergencia:
+        solicitud.emergencia.tenant_id = tenant_asignacion
     db.add(
         Asignacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_asignacion,
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             taller_id=taller.id,
@@ -664,6 +686,7 @@ async def reasignar_taller(
         lng=float(lng_calc),
         tipo=tipo_calc,
         prioridad=prioridad_calc,
+        tenant_id=None,
     )
     if not candidatos:
         _marcar_sin_taller_disponible(db, solicitud, "No hay candidatos para reasignación")
@@ -692,9 +715,16 @@ async def reasignar_taller(
         )
         db.commit()
         return None
+    tenant_asignacion = getattr(nuevo_taller, "tenant_id", None)
+    solicitud.tenant_id = tenant_asignacion
+    if solicitud.incidente:
+        solicitud.incidente.tenant_id = tenant_asignacion
+    if solicitud.emergencia:
+        solicitud.emergencia.tenant_id = tenant_asignacion
     db.add(
         Asignacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_asignacion,
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             taller_id=nuevo_taller.id,
@@ -938,7 +968,16 @@ def evaluar_solicitud_servicio(
             nuevo_taller = None
             candidato = None
             if lat is not None and lng is not None:
-                candidatos = asyncio.run(listar_candidatos(db, lat=lat, lng=lng, tipo=tipo, prioridad=prioridad))
+                candidatos = asyncio.run(
+                    listar_candidatos(
+                        db,
+                        lat=lat,
+                        lng=lng,
+                        tipo=tipo,
+                        prioridad=prioridad,
+                        tenant_id=tenant_id_from(solicitud),
+                    )
+                )
                 for c in candidatos:
                     cid = str(c.get("taller_id"))
                     if cid == str(mi_taller.id):
@@ -959,6 +998,7 @@ def evaluar_solicitud_servicio(
                 db.add(
                     Asignacion(
                         id=uuid.uuid4(),
+                        tenant_id=tenant_id_from(solicitud, nuevo_taller),
                         solicitud_id=solicitud.id,
                         incidente_id=solicitud.incidente_id,
                         taller_id=nuevo_taller.id,

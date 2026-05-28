@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.time import local_now_naive
+from app.core.tenant import assert_same_tenant, tenant_id_from
 from app.models.models import Asignacion, Historial, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
 
 ESTADOS_COMPARTIR_UBICACION = {"tecnico_asignado", "en_camino", "en_diagnostico", "en_proceso"}
@@ -46,6 +47,7 @@ def listar_mis_servicios_asignados(db: Session, *, current_user: Usuario) -> lis
             joinedload(Asignacion.solicitud).joinedload(Solicitud.emergencia),
         )
         .filter(Asignacion.tecnico_id == tecnico.id)
+        .filter(Asignacion.tenant_id == tenant_id_from(tecnico, current_user=current_user))
         .filter(Asignacion.estado.in_(list(ESTADOS_COMPARTIR_UBICACION)))
         .order_by(Asignacion.fecha_asignacion.desc().nullslast(), Asignacion.asignado_en.desc().nullslast())
         .all()
@@ -102,6 +104,7 @@ def reportar_mi_ubicacion(
     )
     if not asignacion:
         raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    assert_same_tenant(asignacion, current_user)
     if str(asignacion.tecnico_id or "") != str(tecnico.id):
         raise HTTPException(status_code=403, detail="No autorizado para esta asignación")
 
@@ -120,6 +123,7 @@ def reportar_mi_ubicacion(
     db.add(
         Ubicacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(asignacion, solicitud, tecnico),
             emergencia_id=solicitud.emergencia.id,
             tecnico_id=tecnico.id,
             asignacion_id=asignacion.id,
@@ -152,6 +156,7 @@ def reportar_mi_ubicacion(
         db.add(
             Historial(
                 id=uuid.uuid4(),
+                tenant_id=tenant_id_from(solicitud, asignacion),
                 solicitud_id=solicitud.id,
                 incidente_id=solicitud.incidente_id,
                 estado_anterior=anterior,
@@ -185,6 +190,7 @@ def reportar_mi_ubicacion(
                 db.add(
                     Historial(
                         id=uuid.uuid4(),
+                        tenant_id=tenant_id_from(solicitud, asignacion),
                         solicitud_id=solicitud.id,
                         incidente_id=solicitud.incidente_id,
                         estado_anterior=anterior,
@@ -201,6 +207,7 @@ def reportar_mi_ubicacion(
             db.add(
                 Notificacion(
                     id=uuid.uuid4(),
+                    tenant_id=tenant_id_from(solicitud, asignacion),
                     usuario_id=solicitud.cliente.usuario_id,
                     solicitud_id=solicitud.id,
                     incidente_id=solicitud.incidente_id,

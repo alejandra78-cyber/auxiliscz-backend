@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.security import get_current_user, get_password_hash
+from app.core.tenant import DEFAULT_TENANT_ID, tenant_id_from
+from app.packages.tenant.services import crear_tenant_para_taller
 from app.core.time import local_now_naive
 from app.packages.auth.services import generar_token_activacion_cuenta
 from app.models.models import (
@@ -593,6 +595,7 @@ def _resolve_or_create_taller_user(
     if not usuario:
         clave_tmp = password_temporal or f"Taller-{secrets.token_urlsafe(10)}"
         usuario = Usuario(
+            tenant_id=DEFAULT_TENANT_ID,
             nombre=responsable_nombre.strip(),
             email=email_normalizado,
             password_hash=get_password_hash(clave_tmp),
@@ -684,6 +687,7 @@ def _resolve_or_create_tecnico_user(
     if not usuario:
         password_temporal = f"Tec-{secrets.token_urlsafe(10)}"
         usuario = Usuario(
+            tenant_id=DEFAULT_TENANT_ID,
             nombre=nombre.strip(),
             email=email_normalizado,
             password_hash=get_password_hash(password_temporal),
@@ -785,6 +789,7 @@ def registrar_solicitud_afiliacion_publica(
         )
 
     solicitud = SolicitudTaller(
+        tenant_id=DEFAULT_TENANT_ID,
         nombre_taller=payload.nombre_taller.strip(),
         responsable_nombre=payload.responsable_nombre.strip(),
         responsable_email=email,
@@ -880,6 +885,7 @@ def aprobar_solicitud_afiliacion_admin(
         taller.aprobado_en = local_now_naive()
     else:
         taller = Taller(
+            tenant_id=None,
             usuario_id=usuario.id,
             nombre=solicitud.nombre_taller,
             direccion=solicitud.direccion,
@@ -896,6 +902,7 @@ def aprobar_solicitud_afiliacion_admin(
         )
         db.add(taller)
         db.flush()
+    tenant = crear_tenant_para_taller(db, taller=taller, current_user=current_user, solicitud=solicitud)
     _sincronizar_servicios_taller(
         db,
         taller=taller,
@@ -919,6 +926,7 @@ def aprobar_solicitud_afiliacion_admin(
             accion="solicitud_taller_aprobada",
             modulo="talleres",
             detalle=f"Solicitud {solicitud.id} aprobada. Usuario {'creado' if usuario_creado else 'reutilizado'}: {usuario.email}",
+            tenant_id=tenant.id,
         )
     )
     db.add(
@@ -1024,6 +1032,8 @@ def crear_taller(
         taller.servicios = json.dumps(datos.servicios)
         taller.disponible = datos.disponible
         taller.estado_operativo = "disponible" if datos.disponible else "ocupado"
+        if not taller.tenant_id:
+            taller.tenant_id = tenant_id_from(usuario_taller)
         taller.capacidad_maxima = max(1, int(getattr(taller, "capacidad_maxima", 1) or 1))
         taller.radio_cobertura_km = float(getattr(taller, "radio_cobertura_km", 10) or 10)
         if taller.estado_aprobacion == "rechazado":
@@ -1040,6 +1050,7 @@ def crear_taller(
         )
     else:
         taller = Taller(
+            tenant_id=tenant_id_from(usuario_taller),
             usuario_id=usuario_taller.id,
             nombre=datos.nombre,
             direccion=datos.direccion,
@@ -1140,10 +1151,12 @@ def aprobar_taller(
     taller.aprobado_en = local_now_naive()
     if taller.usuario:
         taller.usuario.estado = "activo"
+    tenant = crear_tenant_para_taller(db, taller=taller, current_user=current_user)
     db.add(taller)
     db.add(
         Auditoria(
             usuario_id=current_user.id,
+            tenant_id=tenant.id,
             accion="taller_aprobado",
             modulo="talleres",
             detalle=f"Taller {taller.nombre} aprobado. {payload.comentario or ''}".strip(),
@@ -1442,8 +1455,11 @@ def registrar_tecnico(
     if not servicios_especialidad:
         raise HTTPException(status_code=400, detail="Debes seleccionar al menos una especialidad del taller")
 
+    usuario_tecnico.tenant_id = tenant_id_from(taller)
+    db.add(usuario_tecnico)
     estado_operativo = "disponible" if payload.disponible else "ocupado"
     tecnico = Tecnico(
+        tenant_id=tenant_id_from(taller, usuario_tecnico),
         taller_id=taller.id,
         usuario_id=usuario_tecnico.id,
         nombre=(payload.nombre or usuario_tecnico.nombre).strip(),
@@ -1467,6 +1483,7 @@ def registrar_tecnico(
     db.add(
         Notificacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(taller, usuario_tecnico),
             usuario_id=usuario_tecnico.id,
             solicitud_id=None,
             incidente_id=None,

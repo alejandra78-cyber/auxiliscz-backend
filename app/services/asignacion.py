@@ -212,7 +212,8 @@ async def motor_asignacion(
     lat: float,
     lng: float,
     tipo: str,
-    prioridad: int
+    prioridad: int,
+    tenant_id=None,
 ) -> Taller | None:
     """
     Retorna el taller más adecuado para el incidente.
@@ -220,7 +221,10 @@ async def motor_asignacion(
     """
     tipo = _normalizar_tipo(tipo)
     prioridad = int(prioridad or 2)
-    todos_talleres = db.query(Taller).all()
+    q_talleres = db.query(Taller)
+    if tenant_id is not None and hasattr(Taller, "tenant_id"):
+        q_talleres = q_talleres.filter(Taller.tenant_id == tenant_id)
+    todos_talleres = q_talleres.all()
 
     def _candidatos(exigir_aprobado: bool, *, relajar_filtros: bool = False) -> list[tuple[float, float, Taller]]:
         rows: list[tuple[float, float, Taller]] = []
@@ -262,14 +266,17 @@ async def motor_asignacion(
     return taller_ganador
 
 
-async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prioridad: int) -> list:
+async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prioridad: int, tenant_id=None) -> list:
     """
     Retorna lista de talleres candidatos con su puntaje y distancia.
     Útil para mostrar opciones al conductor.
     """
     tipo = _normalizar_tipo(tipo)
     prioridad = int(prioridad or 2)
-    todos_talleres = db.query(Taller).all()
+    q_talleres = db.query(Taller)
+    if tenant_id is not None and hasattr(Taller, "tenant_id"):
+        q_talleres = q_talleres.filter(Taller.tenant_id == tenant_id)
+    todos_talleres = q_talleres.all()
     resultado = []
 
     def _append_candidatos(*, exigir_aprobado: bool, relajar_filtros: bool = False) -> None:

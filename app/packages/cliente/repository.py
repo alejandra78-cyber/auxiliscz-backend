@@ -19,6 +19,7 @@ def crear_vehiculo(
     vehiculo = Vehiculo(
         usuario_id=usuario.id,
         cliente_id=cliente.id if cliente else None,
+        tenant_id=None,
         placa=placa.upper().strip(),
         marca=marca,
         modelo=modelo,
@@ -28,6 +29,9 @@ def crear_vehiculo(
         observacion=observacion,
         activo=True,
     )
+    if cliente and cliente.tenant_id:
+        cliente.tenant_id = None
+        db.add(cliente)
     db.add(vehiculo)
     db.commit()
     db.refresh(vehiculo)

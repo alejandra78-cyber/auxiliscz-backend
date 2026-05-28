@@ -58,7 +58,13 @@ def iniciar_sesion(db: Session, *, email: str, password: str) -> str:
         raise HTTPException(status_code=401, detail="Email o contraseña incorrectos")
     if (usuario.estado or "").lower() in {"inactivo", "bloqueado", "pendiente_activacion"}:
         raise HTTPException(status_code=403, detail="Cuenta pendiente de activación o inactiva")
-    return create_access_token({"sub": str(usuario.id), "rol": usuario.rol})
+    return create_access_token(
+        {
+            "sub": str(usuario.id),
+            "rol": usuario.rol,
+            "tenant_id": str(usuario.tenant_id) if getattr(usuario, "tenant_id", None) else None,
+        }
+    )
 
 
 def cerrar_sesion() -> dict:

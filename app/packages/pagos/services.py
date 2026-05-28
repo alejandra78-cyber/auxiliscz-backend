@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.time import local_now_naive
+from app.core.tenant import assert_same_tenant, stamp_tenant, tenant_id_from
 from app.models.models import (
     Asignacion,
     Cliente,
@@ -160,6 +161,7 @@ def _agregar_historial(db: Session, solicitud: Solicitud, estado_nuevo: str, com
     db.add(
         Historial(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             estado_anterior=solicitud.estado,
@@ -178,6 +180,7 @@ def _notificar(db: Session, *, usuario_id, solicitud: Solicitud, titulo: str, me
     db.add(
         Notificacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud),
             usuario_id=usuario_id,
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
@@ -205,6 +208,7 @@ def generar_cotizacion_taller(
     solicitud = _resolver_solicitud(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    assert_same_tenant(solicitud, current_user)
 
     mi_taller = _resolver_taller_usuario(db, current_user)
     if not mi_taller:
@@ -233,6 +237,7 @@ def generar_cotizacion_taller(
     try:
         cot = Cotizacion(
             id=uuid.uuid4(),
+            tenant_id=getattr(mi_taller, "tenant_id", None) or tenant_id_from(solicitud, mi_taller),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             asignacion_id=asig.id,
@@ -299,6 +304,7 @@ def obtener_cotizacion_cliente(
         cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
         if not cli or str(cot.cliente_id or "") != str(cli.id):
             raise HTTPException(status_code=403, detail="No autorizado para esta cotización")
+    assert_same_tenant(cot, current_user)
 
     return cot
 
@@ -318,6 +324,8 @@ def listar_cotizaciones_taller(
         if not taller:
             raise HTTPException(status_code=403, detail="El usuario no tiene perfil de taller")
         query = query.filter(Cotizacion.taller_id == taller.id)
+    elif current_user.rol != "admin":
+        query = query.filter(Cotizacion.tenant_id == tenant_id_from(current_user=current_user))
 
     if (estado or "").strip():
         query = query.filter(Cotizacion.estado == estado.strip().lower())
@@ -346,6 +354,7 @@ def responder_cotizacion_cliente(
     cot = db.query(Cotizacion).filter(Cotizacion.id == cotizacion_id).first()
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    assert_same_tenant(cot, current_user)
 
     cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
     if not cli or str(cot.cliente_id or "") != str(cli.id):
@@ -415,6 +424,7 @@ def procesar_pago_cliente(
     cot = db.query(Cotizacion).filter(Cotizacion.id == cotizacion_id).first()
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
+    assert_same_tenant(cot, current_user)
 
     cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
     if not cli or str(cot.cliente_id or "") != str(cli.id):
@@ -469,6 +479,7 @@ def procesar_pago_cliente(
     if not pago:
         pago = Pago(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(cot, solicitud),
             monto=float(cot.monto),
             estado=estado_pago,
             metodo=metodo,
@@ -487,6 +498,7 @@ def procesar_pago_cliente(
         db.flush()
         cot.pago_id = pago.id
     else:
+        pago.tenant_id = tenant_id_from(cot, solicitud)
         pago.metodo = metodo
         pago.estado = estado_pago
         pago.incidente_id = cot.incidente_id

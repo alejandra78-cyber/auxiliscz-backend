@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 import uuid
 
+from app.core.tenant import assert_same_tenant, tenant_id_from
 from app.models.models import Asignacion, Cliente, Evaluacion, Pago, Solicitud, TrabajoCompletado, Ubicacion, Usuario
 from app.packages.emergencia.services import cancelar_solicitud as cancelar_solicitud_emergencia
 
@@ -149,6 +150,7 @@ def consultar_estado_solicitud_cliente(db: Session, *, incidente_id: str, curren
         solicitud = db.query(Solicitud).filter(Solicitud.incidente_id == incidente_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
+    assert_same_tenant(solicitud, current_user)
     if (not solicitud.cliente or str(solicitud.cliente.usuario_id) != str(current_user.id)) and current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return solicitud
@@ -548,6 +550,7 @@ def evaluar_servicio_cliente(
 
     row = Evaluacion(
         id=uuid.uuid4(),
+        tenant_id=tenant_id_from(solicitud),
         solicitud_id=solicitud.id,
         estrellas=int(calificacion),
         comentario=(comentario or "").strip() or None,

@@ -7,10 +7,26 @@ from app.core.database import Base, GUID
 from app.core.time import local_now_naive
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    taller_id = Column(GUID(), nullable=True, unique=True, index=True)
+    codigo = Column(String(80), unique=True, nullable=False, index=True)
+    nombre = Column(String(150), nullable=False)
+    descripcion = Column(Text)
+    estado = Column(String(30), default="activo", nullable=False)
+    contacto_email = Column(String(150))
+    contacto_telefono = Column(String(30))
+    creado_en = Column(DateTime, default=local_now_naive, nullable=False)
+    actualizado_en = Column(DateTime, default=local_now_naive, onupdate=local_now_naive)
+
+
 class Usuario(Base):
     __tablename__ = "usuarios"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     nombre = Column(String(100), nullable=False)
     email = Column(String(150), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
@@ -28,6 +44,7 @@ class Usuario(Base):
     mensajes = relationship("Mensaje", back_populates="usuario")
     password_reset_tokens = relationship("PasswordResetToken", back_populates="usuario")
     dispositivos_push = relationship("DispositivoPush", back_populates="usuario")
+    tenant = relationship("Tenant", foreign_keys=[tenant_id])
 
     @property
     def rol(self) -> str:
@@ -85,6 +102,7 @@ class Cliente(Base):
     __tablename__ = "clientes"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), unique=True, nullable=False)
     direccion = Column(String(255))
     creado_en = Column(DateTime, default=local_now_naive)
@@ -93,12 +111,14 @@ class Cliente(Base):
     vehiculos = relationship("Vehiculo", back_populates="cliente")
     solicitudes = relationship("Solicitud", back_populates="cliente")
     incidentes = relationship("Incidente", back_populates="cliente")
+    tenant = relationship("Tenant", foreign_keys=[tenant_id])
 
 
 class SolicitudTaller(Base):
     __tablename__ = "solicitudes_taller"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     nombre_taller = Column(String(120), nullable=False)
     responsable_nombre = Column(String(120), nullable=False)
     responsable_email = Column(String(150), nullable=False, index=True)
@@ -119,12 +139,14 @@ class SolicitudTaller(Base):
     revisor = relationship("Usuario", foreign_keys=[revisado_por])
     usuario = relationship("Usuario", foreign_keys=[usuario_id])
     taller = relationship("Taller", foreign_keys=[taller_id])
+    tenant = relationship("Tenant")
 
 
 class Taller(Base):
     __tablename__ = "talleres"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     nombre = Column(String(120), nullable=False)
     direccion = Column(String(255))
@@ -151,12 +173,14 @@ class Taller(Base):
     asignaciones = relationship("Asignacion", back_populates="taller")
     taller_servicios = relationship("TallerServicio", back_populates="taller")
     servicios_rel = relationship("Servicio", secondary="taller_servicios", viewonly=True)
+    tenant = relationship("Tenant", foreign_keys=[tenant_id])
 
 
 class Tecnico(Base):
     __tablename__ = "tecnicos"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=False)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), unique=True, nullable=True)
     nombre = Column(String(100), nullable=False)
@@ -182,6 +206,7 @@ class Tecnico(Base):
     disponibilidades = relationship("Disponibilidad", back_populates="tecnico")
     tecnico_especialidades = relationship("TecnicoEspecialidad", back_populates="tecnico")
     especialidades_rel = relationship("Servicio", secondary="tecnico_especialidades", viewonly=True)
+    tenant = relationship("Tenant")
 
 
 class Servicio(Base):
@@ -225,6 +250,7 @@ class Vehiculo(Base):
     __tablename__ = "vehiculos"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=True)
     placa = Column(String(20), unique=True, nullable=False)
@@ -241,12 +267,14 @@ class Vehiculo(Base):
     usuario = relationship("Usuario", back_populates="vehiculos")
     cliente = relationship("Cliente", back_populates="vehiculos")
     incidentes = relationship("Incidente", back_populates="vehiculo")
+    tenant = relationship("Tenant")
 
 
 class Incidente(Base):
     __tablename__ = "incidentes"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=False)
     vehiculo_id = Column(GUID(), ForeignKey("vehiculos.id"), nullable=False)
     estado = Column(String(50), default="pendiente", nullable=False)
@@ -278,12 +306,14 @@ class Incidente(Base):
     historial = relationship("Historial", back_populates="incidente")
     notificaciones = relationship("Notificacion", back_populates="incidente")
     mensajes = relationship("Mensaje", back_populates="incidente")
+    tenant = relationship("Tenant")
 
 
 class Solicitud(Base):
     __tablename__ = "solicitudes"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True, unique=True)
     cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=False)
     vehiculo_id = Column(GUID(), ForeignKey("vehiculos.id"), nullable=False)
@@ -304,12 +334,14 @@ class Solicitud(Base):
     notificaciones = relationship("Notificacion", back_populates="solicitud")
     mensajes = relationship("Mensaje", back_populates="solicitud")
     trabajos_completados = relationship("TrabajoCompletado", back_populates="solicitud")
+    tenant = relationship("Tenant")
 
 
 class Emergencia(Base):
     __tablename__ = "emergencias"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), unique=True, nullable=False)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     tipo = Column(String(50), default="otro")
@@ -321,12 +353,14 @@ class Emergencia(Base):
     solicitud = relationship("Solicitud", back_populates="emergencia")
     incidente = relationship("Incidente", back_populates="emergencias")
     ubicaciones = relationship("Ubicacion", back_populates="emergencia")
+    tenant = relationship("Tenant")
 
 
 class Ubicacion(Base):
     __tablename__ = "ubicaciones"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     emergencia_id = Column(GUID(), ForeignKey("emergencias.id"), nullable=False)
     tecnico_id = Column(GUID(), ForeignKey("tecnicos.id"), nullable=True)
     asignacion_id = Column(GUID(), ForeignKey("asignaciones.id"), nullable=True)
@@ -341,12 +375,14 @@ class Ubicacion(Base):
     tecnico = relationship("Tecnico")
     asignacion = relationship("Asignacion")
     incidente = relationship("Incidente")
+    tenant = relationship("Tenant")
 
 
 class Asignacion(Base):
     __tablename__ = "asignaciones"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=True)
@@ -374,6 +410,7 @@ class Asignacion(Base):
     taller = relationship("Taller", back_populates="asignaciones")
     tecnico = relationship("Tecnico", back_populates="asignaciones")
     trabajos_completados = relationship("TrabajoCompletado", back_populates="asignacion")
+    tenant = relationship("Tenant")
 
 
 class Disponibilidad(Base):
@@ -408,18 +445,21 @@ class Evaluacion(Base):
     __tablename__ = "evaluaciones"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     estrellas = Column(Integer, nullable=False)
     comentario = Column(Text)
     creado_en = Column(DateTime, default=local_now_naive)
 
     solicitud = relationship("Solicitud", back_populates="evaluaciones")
+    tenant = relationship("Tenant")
 
 
 class TrabajoCompletado(Base):
     __tablename__ = "trabajos_completados"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False, index=True)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True, index=True)
     asignacion_id = Column(GUID(), ForeignKey("asignaciones.id"), nullable=True, index=True)
@@ -437,12 +477,14 @@ class TrabajoCompletado(Base):
     taller = relationship("Taller")
     tecnico = relationship("Tecnico")
     registrado_por = relationship("Usuario")
+    tenant = relationship("Tenant")
 
 
 class Pago(Base):
     __tablename__ = "pagos"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     monto = Column(Float, nullable=False)
     estado = Column(String(50), default="pendiente")
     metodo = Column(String(50))
@@ -463,12 +505,14 @@ class Pago(Base):
     cliente = relationship("Cliente")
     taller = relationship("Taller")
     verificador = relationship("Usuario")
+    tenant = relationship("Tenant")
 
 
 class Cotizacion(Base):
     __tablename__ = "cotizaciones"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     asignacion_id = Column(GUID(), ForeignKey("asignaciones.id"), nullable=True)
@@ -491,6 +535,7 @@ class Cotizacion(Base):
     taller = relationship("Taller")
     cliente = relationship("Cliente")
     pago = relationship("Pago", back_populates="cotizaciones")
+    tenant = relationship("Tenant")
 
 
 class Comision(Base):
@@ -509,6 +554,7 @@ class Historial(Base):
     __tablename__ = "historial"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     estado_anterior = Column(String(50))
@@ -518,12 +564,14 @@ class Historial(Base):
 
     solicitud = relationship("Solicitud", back_populates="historial")
     incidente = relationship("Incidente", back_populates="historial")
+    tenant = relationship("Tenant")
 
 
 class Evidencia(Base):
     __tablename__ = "evidencias"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     tipo = Column(String(20), nullable=False)
     url_archivo = Column(String(500))
@@ -534,6 +582,7 @@ class Evidencia(Base):
 
     solicitudes = relationship("SolicitudEvidencia", back_populates="evidencia")
     incidente = relationship("Incidente")
+    tenant = relationship("Tenant")
 
 
 class SolicitudEvidencia(Base):
@@ -552,6 +601,7 @@ class Notificacion(Base):
     __tablename__ = "notificaciones"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=True)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
@@ -564,12 +614,14 @@ class Notificacion(Base):
     usuario = relationship("Usuario", back_populates="notificaciones")
     solicitud = relationship("Solicitud", back_populates="notificaciones")
     incidente = relationship("Incidente", back_populates="notificaciones")
+    tenant = relationship("Tenant")
 
 
 class Mensaje(Base):
     __tablename__ = "mensajes"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     solicitud_id = Column(GUID(), ForeignKey("solicitudes.id"), nullable=False)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False)
@@ -579,6 +631,7 @@ class Mensaje(Base):
     solicitud = relationship("Solicitud", back_populates="mensajes")
     incidente = relationship("Incidente", back_populates="mensajes")
     usuario = relationship("Usuario", back_populates="mensajes")
+    tenant = relationship("Tenant")
 
 
 class DispositivoPush(Base):
@@ -599,6 +652,7 @@ class Metrica(Base):
     __tablename__ = "metricas"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     taller_id = Column(GUID(), ForeignKey("talleres.id"), nullable=False)
     codigo = Column(String(80), nullable=False)
     valor = Column(Float, nullable=False, default=0)
@@ -606,12 +660,14 @@ class Metrica(Base):
     creado_en = Column(DateTime, default=local_now_naive)
 
     taller = relationship("Taller", back_populates="metricas")
+    tenant = relationship("Tenant")
 
 
 class Auditoria(Base):
     __tablename__ = "auditorias"
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
     usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=True)
     accion = Column(String(120), nullable=False)
     modulo = Column(String(80), nullable=False)
@@ -619,6 +675,7 @@ class Auditoria(Base):
     fecha = Column(DateTime, default=local_now_naive)
 
     usuario = relationship("Usuario", back_populates="auditorias")
+    tenant = relationship("Tenant")
 
 
 class PasswordResetToken(Base):

@@ -2,6 +2,7 @@ import uuid
 import os
 
 from sqlalchemy.orm import Session, joinedload
+from app.core.tenant import stamp_tenant, tenant_id_from
 from app.core.time import local_now_naive
 
 from app.models.models import (
@@ -15,6 +16,7 @@ from app.models.models import (
     Solicitud,
     SolicitudEvidencia,
     Ubicacion,
+    Usuario,
 )
 
 INCIDENTES_DUAL_WRITE = os.getenv("INCIDENTES_DUAL_WRITE", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -54,8 +56,16 @@ def obtener_solicitud_por_id_o_incidente(db: Session, solicitud_id_o_incidente: 
 def obtener_o_crear_cliente(db: Session, *, usuario_id) -> Cliente:
     cliente = db.query(Cliente).filter(Cliente.usuario_id == usuario_id).first()
     if cliente:
+        if cliente.tenant_id:
+            cliente.tenant_id = None
+            db.add(cliente)
+            db.flush()
         return cliente
-    cliente = Cliente(id=uuid.uuid4(), usuario_id=usuario_id)
+    cliente = Cliente(
+        id=uuid.uuid4(),
+        usuario_id=usuario_id,
+        tenant_id=None,
+    )
     db.add(cliente)
     db.flush()
     return cliente
@@ -72,10 +82,12 @@ def crear_solicitud_emergencia(
     descripcion: str | None,
 ) -> Solicitud:
     cliente = obtener_o_crear_cliente(db, usuario_id=usuario_id)
+    tenant_id = None
     incidente = None
     if INCIDENTES_DUAL_WRITE:
         incidente = Incidente(
             id=uuid.uuid4(),
+            tenant_id=tenant_id,
             cliente_id=cliente.id,
             vehiculo_id=vehiculo_id,
             estado="pendiente",
@@ -92,6 +104,7 @@ def crear_solicitud_emergencia(
 
     solicitud = Solicitud(
         id=uuid.uuid4(),
+        tenant_id=tenant_id,
         incidente_id=incidente.id if incidente else None,
         cliente_id=cliente.id,
         vehiculo_id=vehiculo_id,
@@ -103,6 +116,7 @@ def crear_solicitud_emergencia(
 
     emergencia = Emergencia(
         id=uuid.uuid4(),
+        tenant_id=tenant_id,
         solicitud_id=solicitud.id,
         incidente_id=incidente.id if incidente else None,
         tipo=tipo,
@@ -116,6 +130,7 @@ def crear_solicitud_emergencia(
     db.add(
         Ubicacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id,
             emergencia_id=emergencia.id,
             latitud=lat,
             longitud=lng,
@@ -125,6 +140,7 @@ def crear_solicitud_emergencia(
     db.add(
         Historial(
             id=uuid.uuid4(),
+            tenant_id=tenant_id,
             solicitud_id=solicitud.id,
             incidente_id=incidente.id if incidente else None,
             estado_anterior=None,
@@ -136,9 +152,11 @@ def crear_solicitud_emergencia(
 
 
 def actualizar_ubicacion_solicitud(db: Session, *, solicitud: Solicitud, lat: float, lng: float) -> None:
+    tenant_id = tenant_id_from(solicitud)
     if solicitud.emergencia is None:
         solicitud.emergencia = Emergencia(
             id=uuid.uuid4(),
+            tenant_id=tenant_id,
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             tipo="otro",
@@ -151,6 +169,7 @@ def actualizar_ubicacion_solicitud(db: Session, *, solicitud: Solicitud, lat: fl
     db.add(
         Ubicacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id,
             emergencia_id=solicitud.emergencia.id,
             latitud=lat,
             longitud=lng,
@@ -171,6 +190,7 @@ def agregar_evidencia_solicitud(
 ) -> Evidencia:
     evidencia = Evidencia(
         id=uuid.uuid4(),
+        tenant_id=tenant_id_from(solicitud),
         incidente_id=solicitud.incidente_id,
         tipo=tipo,
         transcripcion=transcripcion,
@@ -208,6 +228,7 @@ def registrar_cambio_estado(
     db.add(
         Historial(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud),
             solicitud_id=solicitud.id,
             incidente_id=solicitud.incidente_id,
             estado_anterior=estado_anterior,
@@ -233,7 +254,13 @@ def crear_mensaje(
     usuario_id,
     texto: str,
 ) -> Mensaje:
-    msg = Mensaje(id=uuid.uuid4(), solicitud_id=solicitud.id, usuario_id=usuario_id, contenido=texto)
+    msg = Mensaje(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id_from(solicitud),
+        solicitud_id=solicitud.id,
+        usuario_id=usuario_id,
+        contenido=texto,
+    )
     msg.incidente_id = solicitud.incidente_id
     db.add(msg)
     db.flush()
@@ -250,9 +277,11 @@ def crear_notificacion(
     mensaje: str,
     tipo: str = "sistema",
 ) -> None:
+    solicitud = db.query(Solicitud).filter(Solicitud.id == solicitud_id).first()
     db.add(
         Notificacion(
             id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud),
             usuario_id=usuario_id,
             solicitud_id=solicitud_id,
             incidente_id=incidente_id,
