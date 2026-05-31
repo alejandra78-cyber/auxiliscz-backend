@@ -80,6 +80,7 @@ def crear_solicitud_emergencia(
     lat: float,
     lng: float,
     descripcion: str | None,
+    offline_sync_id: str | None = None,
 ) -> Solicitud:
     cliente = obtener_o_crear_cliente(db, usuario_id=usuario_id)
     tenant_id = None
@@ -105,6 +106,7 @@ def crear_solicitud_emergencia(
     solicitud = Solicitud(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
+        offline_sync_id=offline_sync_id,
         incidente_id=incidente.id if incidente else None,
         cliente_id=cliente.id,
         vehiculo_id=vehiculo_id,

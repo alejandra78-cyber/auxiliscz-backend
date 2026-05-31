@@ -41,6 +41,7 @@ def generar_cotizacion(
         current_user=current_user,
         incidente_id=payload.incidente_id,
         monto_total=payload.monto_total,
+        tiempo_estimado=payload.tiempo_estimado,
         detalle=payload.detalle,
         observaciones=payload.observaciones,
         validez_hasta=payload.validez_hasta,

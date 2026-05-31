@@ -8,6 +8,7 @@ class PagosDemoOut(BaseModel):
 class CotizacionCreateIn(BaseModel):
     incidente_id: str
     monto_total: float = Field(..., gt=0)
+    tiempo_estimado: str | None = Field(default=None, max_length=120)
     detalle: str = Field(..., min_length=3, max_length=4000)
     observaciones: str | None = Field(default=None, max_length=2000)
     validez_hasta: str | None = None
@@ -19,8 +20,11 @@ class CotizacionOut(BaseModel):
     solicitud_id: str | None = None
     asignacion_id: str | None = None
     taller_id: str | None = None
+    taller_nombre: str | None = None
+    taller_calificacion: float | None = None
     cliente_id: str | None = None
     monto_total: float
+    tiempo_estimado: str | None = None
     detalle: str | None = None
     observaciones: str | None = None
     estado: str

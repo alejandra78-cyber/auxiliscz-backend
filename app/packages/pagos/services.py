@@ -89,6 +89,18 @@ def _ultimo_asignacion(solicitud: Solicitud) -> Asignacion | None:
     )[-1]
 
 
+def _asignacion_de_cotizacion(cot: Cotizacion, solicitud: Solicitud | None = None) -> Asignacion | None:
+    if cot.asignacion:
+        return cot.asignacion
+    solicitud = solicitud or cot.solicitud
+    if not solicitud or not cot.taller_id:
+        return None
+    return next(
+        (a for a in (solicitud.asignaciones or []) if str(a.taller_id or "") == str(cot.taller_id)),
+        None,
+    )
+
+
 def _resolver_taller_usuario(db: Session, current_user: Usuario) -> Taller | None:
     return db.query(Taller).filter(Taller.usuario_id == current_user.id).first()
 
@@ -123,8 +135,11 @@ def _serializar_cotizacion(c: Cotizacion) -> CotizacionOut:
         solicitud_id=str(c.solicitud_id) if c.solicitud_id else None,
         asignacion_id=str(c.asignacion_id) if c.asignacion_id else None,
         taller_id=str(c.taller_id) if c.taller_id else None,
+        taller_nombre=c.taller.nombre if c.taller else None,
+        taller_calificacion=float(c.taller.calificacion) if c.taller and c.taller.calificacion is not None else None,
         cliente_id=str(c.cliente_id) if c.cliente_id else None,
         monto_total=float(c.monto or 0),
+        tiempo_estimado=getattr(c, "tiempo_estimado", None),
         detalle=c.detalle,
         observaciones=c.observaciones,
         estado=str(c.estado),
@@ -198,6 +213,7 @@ def generar_cotizacion_taller(
     current_user: Usuario,
     incidente_id: str,
     monto_total: float,
+    tiempo_estimado: str | None,
     detalle: str,
     observaciones: str | None,
     validez_hasta: str | None,
@@ -208,23 +224,23 @@ def generar_cotizacion_taller(
     solicitud = _resolver_solicitud(db, incidente_id)
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-    assert_same_tenant(solicitud, current_user)
-
     mi_taller = _resolver_taller_usuario(db, current_user)
     if not mi_taller:
         raise HTTPException(status_code=403, detail="El usuario no tiene perfil de taller")
 
-    asig = _ultimo_asignacion(solicitud)
-    if not asig or not asig.taller_id or str(asig.taller_id) != str(mi_taller.id):
+    asig = next(
+        (a for a in (solicitud.asignaciones or []) if str(a.taller_id or "") == str(mi_taller.id)),
+        None,
+    )
+    if not asig:
         raise HTTPException(status_code=403, detail="La solicitud no pertenece a tu taller")
 
     estado_asig = (asig.estado or "").strip().lower()
-    estado_sol = (solicitud.estado or "").strip().lower()
-    estados_permitidos_cot = {"en_diagnostico", "diagnostico_completado"}
-    if estado_asig not in estados_permitidos_cot and estado_sol not in estados_permitidos_cot:
+    estados_permitidos_cot = {"aceptada_para_cotizar", "cotizacion_enviada"}
+    if estado_asig not in estados_permitidos_cot:
         raise HTTPException(
             status_code=400,
-            detail="Solo se puede generar cotización después del diagnóstico",
+            detail="Debes aceptar participar antes de generar una cotización",
         )
 
     validez_dt = None
@@ -244,20 +260,22 @@ def generar_cotizacion_taller(
             taller_id=mi_taller.id,
             cliente_id=solicitud.cliente_id,
             monto=float(monto_total),
+            tiempo_estimado=(tiempo_estimado or "").strip() or None,
             detalle=detalle.strip(),
             observaciones=(observaciones or "").strip() or None,
-            estado="emitida",
+            estado="enviada",
             fecha_emision=local_now_naive(),
             validez_hasta=validez_dt,
             creado_en=local_now_naive(),
             actualizado_en=local_now_naive(),
         )
         db.add(cot)
+        asig.estado = "cotizacion_enviada"
 
         _agregar_historial(
             db,
             solicitud,
-            "cotizacion_emitida",
+            "cotizaciones_recibidas",
             f"Cotización emitida por taller {mi_taller.nombre}",
         )
 
@@ -304,7 +322,8 @@ def obtener_cotizacion_cliente(
         cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
         if not cli or str(cot.cliente_id or "") != str(cli.id):
             raise HTTPException(status_code=403, detail="No autorizado para esta cotización")
-    assert_same_tenant(cot, current_user)
+    if current_user.rol == "admin":
+        assert_same_tenant(cot, current_user)
 
     return cot
 
@@ -354,34 +373,81 @@ def responder_cotizacion_cliente(
     cot = db.query(Cotizacion).filter(Cotizacion.id == cotizacion_id).first()
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
-    assert_same_tenant(cot, current_user)
 
     cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
     if not cli or str(cot.cliente_id or "") != str(cli.id):
         raise HTTPException(status_code=403, detail="No autorizado para responder esta cotización")
 
-    if (cot.estado or "").lower() not in {"emitida", "pendiente", "enviada"}:
+    estado_cot_actual = (cot.estado or "").lower()
+    if estado_cot_actual == "aceptada" and aceptar:
+        solicitud_actual = db.query(Solicitud).filter(Solicitud.id == cot.solicitud_id).first()
+        return CotizacionDecisionOut(
+            cotizacion_id=str(cot.id),
+            estado_cotizacion=str(cot.estado),
+            incidente_id=str(solicitud_actual.incidente_id) if solicitud_actual and solicitud_actual.incidente_id else None,
+            estado_incidente=(str(solicitud_actual.incidente.estado) if solicitud_actual and solicitud_actual.incidente else None),
+            estado_solicitud=str(solicitud_actual.estado) if solicitud_actual else None,
+            mensaje="Cotización ya estaba aceptada",
+        )
+    if estado_cot_actual not in {"emitida", "pendiente", "enviada"}:
         raise HTTPException(status_code=409, detail="La cotización ya fue respondida")
 
     solicitud = db.query(Solicitud).filter(Solicitud.id == cot.solicitud_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud asociada no encontrada")
-    asig = _ultimo_asignacion(solicitud)
+    ya_aceptada = (
+        db.query(Cotizacion)
+        .filter(
+            Cotizacion.solicitud_id == solicitud.id,
+            Cotizacion.id != cot.id,
+            Cotizacion.estado == "aceptada",
+        )
+        .first()
+    )
+    if aceptar and ya_aceptada:
+        raise HTTPException(status_code=409, detail="Ya existe una cotización aceptada para esta solicitud")
+
+    asig = _asignacion_de_cotizacion(cot, solicitud)
 
     cot.estado = "aceptada" if aceptar else "rechazada"
     cot.observaciones = ((cot.observaciones or "") + ("\n" if cot.observaciones and observaciones else "") + (observaciones or "")).strip() or cot.observaciones
     cot.fecha_respuesta_cliente = local_now_naive()
     cot.actualizado_en = local_now_naive()
 
-    nuevo_estado = "cotizacion_aceptada" if aceptar else "cotizacion_rechazada"
+    nuevo_estado = "taller_confirmado" if aceptar else "esperando_cotizaciones"
+    if aceptar:
+        for otra in db.query(Cotizacion).filter(Cotizacion.solicitud_id == solicitud.id, Cotizacion.id != cot.id).all():
+            if (otra.estado or "").lower() not in {"rechazada", "vencida"}:
+                otra.estado = "rechazada"
+                otra.actualizado_en = local_now_naive()
+                otra.fecha_respuesta_cliente = otra.fecha_respuesta_cliente or local_now_naive()
+        for otra_asig in solicitud.asignaciones or []:
+            if asig and str(otra_asig.id) == str(asig.id):
+                continue
+            if (otra_asig.estado or "").lower() not in {"rechazada", "cancelada", "cancelado"}:
+                otra_asig.estado = "descartada"
+                otra_asig.es_definitiva = False
+        if asig:
+            asig.estado = "confirmada"
+            asig.es_definitiva = True
+            asig.tipo_asignacion = "definitiva"
+            asig.fecha_confirmacion = local_now_naive()
+        tenant_elegido = cot.tenant_id or (asig.tenant_id if asig else None) or (cot.taller.tenant_id if cot.taller else None)
+        solicitud.tenant_id = tenant_elegido
+        if solicitud.incidente:
+            solicitud.incidente.tenant_id = tenant_elegido
+        if solicitud.emergencia:
+            solicitud.emergencia.tenant_id = tenant_elegido
+    else:
+        if asig and (asig.estado or "").lower() == "cotizacion_enviada":
+            asig.estado = "aceptada_para_cotizar"
+
     _agregar_historial(
         db,
         solicitud,
         nuevo_estado,
-        "Cliente aceptó cotización" if aceptar else "Cliente rechazó cotización",
+        "Cliente seleccionó una cotización y confirmó taller" if aceptar else "Cliente rechazó cotización",
     )
-    if asig:
-        asig.estado = nuevo_estado
 
     if cot.taller and cot.taller.usuario_id:
         _notificar(
@@ -424,7 +490,6 @@ def procesar_pago_cliente(
     cot = db.query(Cotizacion).filter(Cotizacion.id == cotizacion_id).first()
     if not cot:
         raise HTTPException(status_code=404, detail="Cotización no encontrada")
-    assert_same_tenant(cot, current_user)
 
     cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
     if not cli or str(cot.cliente_id or "") != str(cli.id):

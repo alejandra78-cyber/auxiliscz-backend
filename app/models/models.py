@@ -314,6 +314,7 @@ class Solicitud(Base):
 
     id = Column(GUID(), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
+    offline_sync_id = Column(String(120), unique=True, nullable=True, index=True)
     incidente_id = Column(GUID(), ForeignKey("incidentes.id"), nullable=True, unique=True)
     cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=False)
     vehiculo_id = Column(GUID(), ForeignKey("vehiculos.id"), nullable=False)
@@ -334,6 +335,26 @@ class Solicitud(Base):
     notificaciones = relationship("Notificacion", back_populates="solicitud")
     mensajes = relationship("Mensaje", back_populates="solicitud")
     trabajos_completados = relationship("TrabajoCompletado", back_populates="solicitud")
+    tenant = relationship("Tenant")
+
+
+class OperacionOffline(Base):
+    __tablename__ = "operaciones_offline"
+
+    id = Column(GUID(), primary_key=True, default=uuid.uuid4)
+    offline_sync_id = Column(String(120), unique=True, nullable=False, index=True)
+    usuario_id = Column(GUID(), ForeignKey("usuarios.id"), nullable=False, index=True)
+    tenant_id = Column(GUID(), ForeignKey("tenants.id"), nullable=True, index=True)
+    tipo_operacion = Column(String(80), nullable=False, index=True)
+    estado_sync = Column(String(40), default="pendiente_sincronizacion", nullable=False)
+    payload = Column(Text)
+    resultado = Column(Text)
+    error = Column(Text)
+    fecha_local = Column(DateTime)
+    creado_en = Column(DateTime, default=local_now_naive, nullable=False)
+    sincronizado_en = Column(DateTime)
+
+    usuario = relationship("Usuario")
     tenant = relationship("Tenant")
 
 
@@ -402,6 +423,9 @@ class Asignacion(Base):
     motivo_cancelacion = Column(Text)
     cancelado_en = Column(DateTime)
     origen_asignacion = Column(String(30), default="manual")
+    tipo_asignacion = Column(String(30), default="candidata")
+    es_definitiva = Column(Boolean, default=False, nullable=False)
+    fecha_confirmacion = Column(DateTime)
     estado = Column(String(50), default="asignada")
     asignado_en = Column(DateTime, default=local_now_naive)
 
@@ -520,6 +544,7 @@ class Cotizacion(Base):
     cliente_id = Column(GUID(), ForeignKey("clientes.id"), nullable=True)
     pago_id = Column(GUID(), ForeignKey("pagos.id"), unique=True, nullable=True)
     monto = Column(Float, nullable=False)
+    tiempo_estimado = Column(String(120))
     detalle = Column(Text)
     observaciones = Column(Text)
     estado = Column(String(50), default="pendiente")

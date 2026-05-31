@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import uuid
+import asyncio
+from datetime import datetime
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -14,7 +16,7 @@ from app.ai_modules.clasificador import clasificar_incidente
 from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
 from app.core.time import local_now_naive
-from app.models.models import Asignacion, Solicitud, Usuario, Vehiculo
+from app.models.models import Asignacion, OperacionOffline, Solicitud, Usuario, Vehiculo
 from app.services.notificaciones import enviar_push
 
 from .repository import (
@@ -94,6 +96,46 @@ def _save_uploaded_bytes(content: bytes, original_name: str | None, kind: str) -
     if not re.match(r"^https?://", public_base, re.IGNORECASE):
         public_base = "http://127.0.0.1:8000"
     return f"{public_base}/uploads/emergencias/{filename}"
+
+
+def _parse_fecha_local(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _json_dict(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _resultado_reporte(solicitud: Solicitud, mensaje: str = "Emergencia registrada correctamente") -> dict:
+    return {
+        "incidente_id": str(solicitud.id),
+        "estado": str(solicitud.estado),
+        "tipo": solicitud.incidente.tipo if solicitud.incidente else (solicitud.emergencia.tipo if solicitud.emergencia else None),
+        "prioridad": solicitud.incidente.prioridad if solicitud.incidente else solicitud.prioridad,
+        "resumen_ia": solicitud.incidente.resumen_ia if solicitud.incidente else None,
+        "ia_estado": solicitud.incidente.ia_estado if solicitud.incidente else None,
+        "asignacion_id": str(solicitud.asignaciones[-1].id) if solicitud.asignaciones else None,
+        "mensaje": mensaje,
+    }
+
+
+def _resultado_solicitud(solicitud: Solicitud) -> dict:
+    return {
+        "solicitud_id": str(solicitud.id),
+        "incidente_id": str(solicitud.incidente_id) if solicitud.incidente_id else str(solicitud.id),
+        "estado": str(solicitud.estado),
+    }
 
 
 def _estado_key(value: str | None) -> str:
@@ -229,11 +271,11 @@ def _read_uploaded_bytes_from_url(url: str | None) -> bytes | None:
 
 
 async def transcribir_audio_a_texto(audio_bytes: bytes, idioma: str = "es") -> str:
-    return await transcribir_audio(audio_bytes, idioma)
+    return await asyncio.wait_for(transcribir_audio(audio_bytes, idioma), timeout=22)
 
 
 async def clasificar_incidente_por_imagenes(imagen_bytes: bytes) -> dict:
-    return await analizar_imagen(imagen_bytes)
+    return await asyncio.wait_for(analizar_imagen(imagen_bytes), timeout=22)
 
 
 def asignar_nivel_prioridad(tipo_incidente: str) -> int:
@@ -241,7 +283,7 @@ def asignar_nivel_prioridad(tipo_incidente: str) -> int:
 
 
 async def generar_ficha_resumen_incidente(clasificacion: dict, evidencias: list[dict]) -> str:
-    return await generar_resumen(clasificacion, evidencias)
+    return await asyncio.wait_for(generar_resumen(clasificacion, evidencias), timeout=18)
 
 
 def _puede_ver_solicitud(solicitud: Solicitud, current_user: Usuario) -> bool:
@@ -275,6 +317,8 @@ async def reportar_emergencia(
     foto: UploadFile | None,
     fotos: list[UploadFile] | None,
     audio: UploadFile | None,
+    offline_sync_id: str | None = None,
+    fecha_local: str | None = None,
 ) -> dict:
     if current_user.rol not in {"conductor", "cliente", "admin"}:
         raise HTTPException(status_code=403, detail="Solo cliente/admin puede reportar emergencias")
@@ -286,6 +330,38 @@ async def reportar_emergencia(
     )
     if not vehiculo:
         raise HTTPException(status_code=400, detail="El vehículo no existe o no pertenece al cliente autenticado")
+
+    sync_id = (offline_sync_id or "").strip() or None
+    operacion_offline: OperacionOffline | None = None
+    if sync_id:
+        existente = db.query(OperacionOffline).filter(OperacionOffline.offline_sync_id == sync_id).first()
+        if existente and existente.estado_sync == "sincronizado":
+            return _json_dict(existente.resultado)
+        if existente and existente.estado_sync in {"sincronizando", "pendiente_sincronizacion"}:
+            raise HTTPException(status_code=409, detail="La emergencia offline ya está siendo sincronizada")
+        solicitud_existente = db.query(Solicitud).filter(Solicitud.offline_sync_id == sync_id).first()
+        if solicitud_existente:
+            return _resultado_reporte(solicitud_existente, "Emergencia sincronizada previamente")
+        operacion_offline = OperacionOffline(
+            id=uuid.uuid4(),
+            offline_sync_id=sync_id,
+            usuario_id=current_user.id,
+            tenant_id=None,
+            tipo_operacion="reportar_emergencia",
+            estado_sync="sincronizando",
+            fecha_local=_parse_fecha_local(fecha_local),
+            payload=json.dumps(
+                {
+                    "vehiculo_id": vehiculo_id,
+                    "lat": lat,
+                    "lng": lng,
+                    "descripcion": descripcion,
+                    "tipo": tipo,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        db.add(operacion_offline)
 
     descripcion_limpia = (descripcion or "").strip()
     fotos_recibidas = [f for f in (fotos or []) if f is not None]
@@ -309,6 +385,7 @@ async def reportar_emergencia(
         lat=lat,
         lng=lng,
         descripcion=descripcion_limpia or None,
+        offline_sync_id=sync_id,
     )
     evidencias_datos: list[dict] = []
     ia_estado = "pendiente"
@@ -423,7 +500,7 @@ async def reportar_emergencia(
         evidencias=evidencias_datos,
         usuario_id=str(current_user.id),
     )
-    return {
+    resultado = {
         "incidente_id": str(solicitud.id),
         "estado": str(solicitud.estado),
         "tipo": tipo_ia,
@@ -432,6 +509,13 @@ async def reportar_emergencia(
         "ia_estado": ia_estado,
         "mensaje": "Emergencia registrada correctamente",
     }
+    if operacion_offline:
+        operacion_offline.estado_sync = "sincronizado"
+        operacion_offline.resultado = json.dumps(resultado, ensure_ascii=False)
+        operacion_offline.error = None
+        operacion_offline.sincronizado_en = local_now_naive()
+        db.commit()
+    return resultado
 
 
 async def _procesar_asignacion_automatica(
@@ -543,7 +627,7 @@ async def _procesar_asignacion_automatica(
 
         # Clasificación multimodal (texto + audio + imagen)
         try:
-            clasificacion_mm = await clasificar_incidente(evidencias_mm)
+            clasificacion_mm = await asyncio.wait_for(clasificar_incidente(evidencias_mm), timeout=14)
             if clasificacion_mm:
                 tipo_mm = _normalizar_tipo_clasificado(clasificacion_mm.get("tipo", tipo))
                 conf_mm = float(clasificacion_mm.get("confianza", confianza))
@@ -677,6 +761,7 @@ async def _procesar_asignacion_automatica(
             )
             if solicitud.incidente:
                 solicitud.incidente.resumen_ia = resumen
+                solicitud.incidente.ia_estado = "procesado"
                 # Hubo fallback exitoso local, evitamos dejarlo como fallido vacío.
                 solicitud.incidente.ia_estado = "procesado"
 
@@ -698,7 +783,10 @@ async def _procesar_asignacion_automatica(
                 prioridad=prioridad,
             )
         except HTTPException as exc:
-            if exc.status_code == 400 and "asignación activa" in (exc.detail or "").lower():
+            detalle = (exc.detail or "").lower()
+            if exc.status_code == 400 and (
+                "asignación activa" in detalle or "candidatos activos" in detalle
+            ):
                 # La IA ya quedó guardada arriba; no hacemos rollback para no perderla.
                 return
             db.rollback()
@@ -744,6 +832,180 @@ async def _procesar_asignacion_automatica(
                 db.commit()
     finally:
         db.close()
+
+
+def sincronizar_operaciones_offline(
+    db: Session,
+    *,
+    current_user: Usuario,
+    operaciones: list,
+) -> list[dict]:
+    resultados: list[dict] = []
+    for op in operaciones:
+        sync_id = (op.offline_sync_id or "").strip()
+        tipo_operacion = (op.tipo_operacion or "").strip().lower()
+        payload = op.payload or {}
+        if not sync_id:
+            resultados.append(
+                {
+                    "offline_sync_id": "",
+                    "tipo_operacion": tipo_operacion,
+                    "estado_sync": "error_sincronizacion",
+                    "resultado": None,
+                    "error": "offline_sync_id es obligatorio",
+                }
+            )
+            continue
+        existente = db.query(OperacionOffline).filter(OperacionOffline.offline_sync_id == sync_id).first()
+        if existente and existente.estado_sync == "sincronizado":
+            resultados.append(
+                {
+                    "offline_sync_id": sync_id,
+                    "tipo_operacion": existente.tipo_operacion,
+                    "estado_sync": "sincronizado",
+                    "resultado": _json_dict(existente.resultado),
+                    "error": None,
+                }
+            )
+            continue
+
+        row = existente or OperacionOffline(
+            id=uuid.uuid4(),
+            offline_sync_id=sync_id,
+            usuario_id=current_user.id,
+            tenant_id=getattr(current_user, "tenant_id", None),
+            tipo_operacion=tipo_operacion,
+            estado_sync="sincronizando",
+            fecha_local=_parse_fecha_local(op.fecha_local),
+        )
+        row.usuario_id = current_user.id
+        row.tenant_id = getattr(current_user, "tenant_id", None)
+        row.tipo_operacion = tipo_operacion
+        row.estado_sync = "sincronizando"
+        row.payload = json.dumps(payload, ensure_ascii=False)
+        row.error = None
+        db.add(row)
+        db.flush()
+
+        try:
+            resultado = _procesar_operacion_offline(db, current_user=current_user, tipo_operacion=tipo_operacion, payload=payload)
+            row.estado_sync = "sincronizado"
+            row.resultado = json.dumps(resultado, ensure_ascii=False)
+            row.sincronizado_en = local_now_naive()
+            row.error = None
+            db.commit()
+            resultados.append(
+                {
+                    "offline_sync_id": sync_id,
+                    "tipo_operacion": tipo_operacion,
+                    "estado_sync": "sincronizado",
+                    "resultado": resultado,
+                    "error": None,
+                }
+            )
+        except HTTPException as exc:
+            db.rollback()
+            row = db.query(OperacionOffline).filter(OperacionOffline.offline_sync_id == sync_id).first()
+            if row:
+                row.estado_sync = "conflicto" if exc.status_code in {400, 409} else "error_sincronizacion"
+                row.error = str(exc.detail)
+                row.sincronizado_en = local_now_naive()
+                db.add(row)
+                db.commit()
+            resultados.append(
+                {
+                    "offline_sync_id": sync_id,
+                    "tipo_operacion": tipo_operacion,
+                    "estado_sync": "conflicto" if exc.status_code in {400, 409} else "error_sincronizacion",
+                    "resultado": None,
+                    "error": str(exc.detail),
+                }
+            )
+        except Exception as exc:
+            logger.exception("Error sincronizando operacion offline %s", sync_id)
+            db.rollback()
+            row = db.query(OperacionOffline).filter(OperacionOffline.offline_sync_id == sync_id).first()
+            if row:
+                row.estado_sync = "error_sincronizacion"
+                row.error = str(exc)
+                row.sincronizado_en = local_now_naive()
+                db.add(row)
+                db.commit()
+            resultados.append(
+                {
+                    "offline_sync_id": sync_id,
+                    "tipo_operacion": tipo_operacion,
+                    "estado_sync": "error_sincronizacion",
+                    "resultado": None,
+                    "error": str(exc),
+                }
+            )
+    return resultados
+
+
+def _procesar_operacion_offline(
+    db: Session,
+    *,
+    current_user: Usuario,
+    tipo_operacion: str,
+    payload: dict,
+) -> dict:
+    incidente_id = str(payload.get("incidente_id") or payload.get("solicitud_id") or "").strip()
+    if not incidente_id:
+        raise HTTPException(status_code=400, detail="La operación offline no tiene solicitud asociada")
+
+    if tipo_operacion in {"aceptar_solicitud", "rechazar_solicitud"}:
+        from app.packages.asignacion.services import evaluar_solicitud_servicio
+
+        solicitud = evaluar_solicitud_servicio(
+            db,
+            incidente_id=incidente_id,
+            current_user=current_user,
+            aprobar=(tipo_operacion == "aceptar_solicitud"),
+            observacion=payload.get("observacion") or payload.get("motivo_rechazo"),
+        )
+        return _resultado_solicitud(solicitud)
+
+    if tipo_operacion in {"actualizar_estado", "accion_servicio"}:
+        from app.packages.asignacion.services import actualizar_estado_servicio, ejecutar_accion_operativa_servicio
+
+        if tipo_operacion == "accion_servicio" or payload.get("accion"):
+            solicitud = ejecutar_accion_operativa_servicio(
+                db,
+                incidente_id=incidente_id,
+                current_user=current_user,
+                accion=str(payload.get("accion") or ""),
+                observacion=payload.get("observacion"),
+                tecnico_id=payload.get("tecnico_id") or payload.get("tecnicoId"),
+                servicio=payload.get("servicio"),
+            )
+        else:
+            solicitud = actualizar_estado_servicio(
+                db,
+                incidente_id=incidente_id,
+                current_user=current_user,
+                estado=str(payload.get("estado") or ""),
+                observacion=payload.get("observacion"),
+                tecnico_id=payload.get("tecnico_id") or payload.get("tecnicoId"),
+            )
+        return _resultado_solicitud(solicitud)
+
+    if tipo_operacion == "generar_cotizacion":
+        from app.packages.pagos.services import cotizacion_out, generar_cotizacion_taller
+
+        cotizacion = generar_cotizacion_taller(
+            db,
+            current_user=current_user,
+            incidente_id=incidente_id,
+            monto_total=float(payload.get("monto_total") or payload.get("monto") or 0),
+            tiempo_estimado=payload.get("tiempo_estimado"),
+            detalle=str(payload.get("detalle") or ""),
+            observaciones=payload.get("observaciones"),
+            validez_hasta=payload.get("validez_hasta"),
+        )
+        return cotizacion_out(cotizacion).model_dump()
+
+    raise HTTPException(status_code=400, detail="Tipo de operación offline no soportado")
 
 
 def consultar_estado_solicitud(db: Session, *, incidente_id: str, current_user: Usuario):

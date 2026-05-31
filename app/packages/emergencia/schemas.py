@@ -1,4 +1,5 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Any
 
 
 class ReportarEmergenciaOut(BaseModel):
@@ -72,3 +73,26 @@ class NotificacionOut(BaseModel):
     tipo: str
     estado: str
     creada_en: str | None = None
+
+
+class OperacionOfflineIn(BaseModel):
+    offline_sync_id: str
+    tipo_operacion: str
+    fecha_local: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SyncOfflineIn(BaseModel):
+    operaciones: list[OperacionOfflineIn]
+
+
+class OperacionOfflineOut(BaseModel):
+    offline_sync_id: str
+    tipo_operacion: str
+    estado_sync: str
+    resultado: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class SyncOfflineOut(BaseModel):
+    resultados: list[OperacionOfflineOut]

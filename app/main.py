@@ -111,6 +111,7 @@ def _ensure_incremental_schema() -> None:
             "mensajes",
             "metricas",
             "auditorias",
+            "operaciones_offline",
         ]
         for table_name in tenant_tables:
             if table_name not in tables:
@@ -129,6 +130,45 @@ def _ensure_incremental_schema() -> None:
             conn.execute(text("UPDATE vehiculos SET tenant_id = NULL"))
         if "usuarios" in tables and "clientes" in tables:
             conn.execute(text("UPDATE usuarios SET tenant_id = NULL WHERE id IN (SELECT usuario_id FROM clientes)"))
+
+        if "solicitudes" in tables:
+            cols_sol = {c["name"] for c in inspector.get_columns("solicitudes")}
+            if "offline_sync_id" not in cols_sol:
+                conn.execute(text("ALTER TABLE solicitudes ADD COLUMN offline_sync_id VARCHAR(120)"))
+            if is_pg:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS ux_solicitudes_offline_sync_id "
+                        "ON solicitudes(offline_sync_id) WHERE offline_sync_id IS NOT NULL"
+                    )
+                )
+
+        if "operaciones_offline" not in tables:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS operaciones_offline (
+                        id {guid_sql} PRIMARY KEY,
+                        offline_sync_id VARCHAR(120) UNIQUE NOT NULL,
+                        usuario_id {guid_sql} NOT NULL REFERENCES usuarios(id),
+                        tenant_id {guid_sql} NULL,
+                        tipo_operacion VARCHAR(80) NOT NULL,
+                        estado_sync VARCHAR(40) NOT NULL DEFAULT 'pendiente_sincronizacion',
+                        payload TEXT,
+                        resultado TEXT,
+                        error TEXT,
+                        fecha_local TIMESTAMP,
+                        creado_en TIMESTAMP DEFAULT {now_sql},
+                        sincronizado_en TIMESTAMP
+                    )
+                    """
+                )
+            )
+            tables.add("operaciones_offline")
+        if "operaciones_offline" in tables and is_pg:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_operaciones_offline_sync_id ON operaciones_offline(offline_sync_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_operaciones_offline_usuario_estado ON operaciones_offline(usuario_id, estado_sync)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_operaciones_offline_tenant_estado ON operaciones_offline(tenant_id, estado_sync)"))
 
         if "incidentes" not in tables:
             if conn.dialect.name == "postgresql":
@@ -292,6 +332,16 @@ def _ensure_incremental_schema() -> None:
                 conn.execute(text("ALTER TABLE asignaciones ADD COLUMN motivo_rechazo TEXT"))
             if "origen_asignacion" not in cols_asig:
                 conn.execute(text("ALTER TABLE asignaciones ADD COLUMN origen_asignacion VARCHAR(30)"))
+            if "tipo_asignacion" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN tipo_asignacion VARCHAR(30) DEFAULT 'candidata'"))
+            if "es_definitiva" not in cols_asig:
+                conn.execute(text("ALTER TABLE asignaciones ADD COLUMN es_definitiva BOOLEAN NOT NULL DEFAULT FALSE"))
+            if "fecha_confirmacion" not in cols_asig:
+                conn.execute(
+                    text("ALTER TABLE asignaciones ADD COLUMN fecha_confirmacion TIMESTAMP WITHOUT TIME ZONE")
+                    if conn.dialect.name == "postgresql"
+                    else text("ALTER TABLE asignaciones ADD COLUMN fecha_confirmacion DATETIME")
+                )
             if "fecha_aceptacion" not in cols_asig:
                 conn.execute(
                     text("ALTER TABLE asignaciones ADD COLUMN fecha_aceptacion TIMESTAMP WITHOUT TIME ZONE")
@@ -333,6 +383,8 @@ def _ensure_incremental_schema() -> None:
                 )
             if "observaciones" not in cols_cot:
                 conn.execute(text("ALTER TABLE cotizaciones ADD COLUMN observaciones TEXT"))
+            if "tiempo_estimado" not in cols_cot:
+                conn.execute(text("ALTER TABLE cotizaciones ADD COLUMN tiempo_estimado VARCHAR(120)"))
             if "fecha_emision" not in cols_cot:
                 conn.execute(
                     text("ALTER TABLE cotizaciones ADD COLUMN fecha_emision TIMESTAMP WITHOUT TIME ZONE")

@@ -12,6 +12,8 @@ from .schemas import (
     MensajeIn,
     MensajeOut,
     NotificacionOut,
+    SyncOfflineIn,
+    SyncOfflineOut,
     ReportarEmergenciaOut,
     UbicacionGpsIn,
     UbicacionGpsOut,
@@ -26,6 +28,7 @@ from .services import (
     listar_notificaciones_solicitud,
     reportar_emergencia,
     solicitud_es_cancelable,
+    sincronizar_operaciones_offline,
 )
 
 router = APIRouter()
@@ -54,6 +57,8 @@ async def reportar_emergencia_endpoint(
     lat: float = Form(...),
     lng: float = Form(...),
     descripcion: str | None = Form(None),
+    offline_sync_id: str | None = Form(None),
+    fecha_local: str | None = Form(None),
     foto: UploadFile | None = File(None),
     fotos: list[UploadFile] | None = File(None),
     audio: UploadFile | None = File(None),
@@ -69,6 +74,8 @@ async def reportar_emergencia_endpoint(
         lat=lat,
         lng=lng,
         descripcion=descripcion,
+        offline_sync_id=offline_sync_id,
+        fecha_local=fecha_local,
         foto=foto,
         fotos=fotos,
         audio=audio,
@@ -83,6 +90,20 @@ async def reportar_emergencia_endpoint(
         asignacion_id=data.get("asignacion_id"),
         mensaje=data["mensaje"],
     )
+
+
+@router.post("/sync/offline", response_model=SyncOfflineOut)
+def sincronizar_offline_endpoint(
+    payload: SyncOfflineIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    resultados = sincronizar_operaciones_offline(
+        db,
+        current_user=current_user,
+        operaciones=payload.operaciones,
+    )
+    return SyncOfflineOut(resultados=resultados)
 
 
 @router.get("/solicitud/{incidente_id}", response_model=EstadoSolicitudOut)

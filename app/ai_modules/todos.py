@@ -99,7 +99,7 @@ async def transcribir_audio(contenido: bytes, idioma: str = "es") -> str:
     """
     Convierte audio (bytes) a texto usando Whisper.
     """
-    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=_audio_suffix(contenido), delete=False) as tmp:
         tmp.write(contenido)
         tmp_path = tmp.name
 
@@ -205,7 +205,18 @@ def _client() -> openai.AsyncOpenAI:
     key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not key:
         raise RuntimeError("OPENAI_API_KEY no está configurada")
-    return openai.AsyncOpenAI(api_key=key)
+    return openai.AsyncOpenAI(api_key=key, timeout=20.0, max_retries=0)
+
+
+def _audio_suffix(contenido: bytes) -> str:
+    head = contenido[:32]
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".webm"
+    if b"ftyp" in head:
+        return ".m4a"
+    if head.startswith(b"RIFF"):
+        return ".wav"
+    return ".m4a"
 
 
 def _parse_json_safely(raw: str) -> dict:

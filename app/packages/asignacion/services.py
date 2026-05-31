@@ -61,7 +61,16 @@ CATALOGO_SERVICIOS = {
 }
 
 ESTADOS_CU17_VALIDOS = {
+    "buscando_talleres",
+    "esperando_respuestas",
+    "esperando_cotizaciones",
+    "cotizaciones_recibidas",
+    "taller_confirmado",
     "pendiente_respuesta",
+    "aceptada_para_cotizar",
+    "cotizacion_enviada",
+    "confirmada",
+    "descartada",
     "aceptada",
     "tecnico_asignado",
     "en_camino",
@@ -96,6 +105,7 @@ TRANSICIONES_CU17: dict[str, set[str]] = {
 }
 
 ESTADOS_ASIGNACION_ACTIVA_CU17 = {
+    "confirmada",
     "aceptada",
     "tecnico_asignado",
     "en_camino",
@@ -544,9 +554,14 @@ async def asignar_taller_automaticamente(
     if solicitud.estado in {"cancelada", "cancelado", "completada", "finalizado"}:
         raise HTTPException(status_code=400, detail="La solicitud ya está cerrada")
 
-    ultima = _get_ultimo_asignacion(solicitud)
-    if ultima and _normalizar_estado_servicio(ultima.estado) in {"pendiente_respuesta", "aceptada", "tecnico_asignado", "en_camino", "en_proceso"}:
-        raise HTTPException(status_code=400, detail="La solicitud ya tiene una asignación activa")
+    existentes_candidatas = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if (a.estado or "").lower()
+        in {"pendiente_respuesta", "aceptada_para_cotizar", "cotizacion_enviada", "confirmada"}
+    ]
+    if existentes_candidatas:
+        raise HTTPException(status_code=400, detail="La solicitud ya tiene candidatos activos")
 
     if lat is None or lng is None:
         lat_calc, lng_calc = _get_ubicacion_incidente(solicitud)
@@ -572,86 +587,73 @@ async def asignar_taller_automaticamente(
         _marcar_sin_taller_disponible(db, solicitud, "No hay talleres candidatos para asignación automática")
         db.commit()
         return None
-    candidato = candidatos[0]
-    taller_id = candidato.get("taller_id")
-    if not taller_id:
-        _marcar_sin_taller_disponible(
-            db,
-            solicitud,
-            "Motor de asignación devolvió candidato sin taller_id",
-        )
-        db.commit()
-        return None
-
-    # Robustez: evitamos fallos silenciosos por desajustes UUID/string.
-    taller = None
-    try:
-        taller_uuid = uuid.UUID(str(taller_id))
-        taller = db.query(Taller).filter(Taller.id == taller_uuid).first()
-    except Exception:
+    talleres_creados: list[Taller] = []
+    for candidato in candidatos[:3]:
+        taller_id = candidato.get("taller_id")
+        if not taller_id:
+            continue
         taller = None
-
-    if not taller:
-        taller = next((t for t in db.query(Taller).all() if str(t.id) == str(taller_id)), None)
-
-    if not taller:
-        _marcar_sin_taller_disponible(
-            db,
-            solicitud,
-            f"No se pudo resolver el taller candidato ({taller_id})",
+        try:
+            taller_uuid = uuid.UUID(str(taller_id))
+            taller = db.query(Taller).filter(Taller.id == taller_uuid).first()
+        except Exception:
+            taller = None
+        if not taller:
+            taller = next((t for t in db.query(Taller).all() if str(t.id) == str(taller_id)), None)
+        if not taller:
+            continue
+        talleres_creados.append(taller)
+        db.add(
+            Asignacion(
+                id=uuid.uuid4(),
+                tenant_id=getattr(taller, "tenant_id", None),
+                solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
+                taller_id=taller.id,
+                tecnico_id=None,
+                fecha_asignacion=local_now_naive(),
+                distancia_km=float(candidato.get("distancia_km", 0) or 0),
+                puntaje=float(candidato.get("puntaje", 0) or 0),
+                motivo_asignacion=str(candidato.get("motivo") or "Candidato automático para cotizar"),
+                origen_asignacion="automatica",
+                tipo_asignacion="candidata",
+                es_definitiva=False,
+                estado="pendiente_respuesta",
+            )
         )
+        if taller.usuario_id:
+            _crear_notificacion_evento(
+                db,
+                solicitud=solicitud,
+                usuario_id=taller.usuario_id,
+                titulo="Nueva solicitud para cotizar",
+                mensaje=f"Recibiste {codigo_solicitud(solicitud)} para decidir si participas y cotizas",
+                tipo="solicitud_candidata",
+            )
+    if not talleres_creados:
+        _marcar_sin_taller_disponible(db, solicitud, "No se pudo resolver ningún taller candidato")
         db.commit()
         return None
-    tenant_asignacion = getattr(taller, "tenant_id", None)
-    solicitud.tenant_id = tenant_asignacion
-    if solicitud.incidente:
-        solicitud.incidente.tenant_id = tenant_asignacion
-    if solicitud.emergencia:
-        solicitud.emergencia.tenant_id = tenant_asignacion
-    db.add(
-        Asignacion(
-            id=uuid.uuid4(),
-            tenant_id=tenant_asignacion,
-            solicitud_id=solicitud.id,
-            incidente_id=solicitud.incidente_id,
-            taller_id=taller.id,
-            tecnico_id=None,
-            fecha_asignacion=local_now_naive(),
-            distancia_km=float(candidato.get("distancia_km", 0) or 0),
-            puntaje=float(candidato.get("puntaje", 0) or 0),
-            motivo_asignacion=str(candidato.get("motivo") or "Asignación automática por motor"),
-            origen_asignacion="automatica",
-            estado="pendiente_respuesta",
-        )
-    )
     _guardar_historial(
         db,
         solicitud=solicitud,
         anterior=solicitud.estado,
-        nuevo="asignada",
-        comentario="Asignación automática",
+        nuevo="esperando_respuestas",
+        comentario=f"Solicitud enviada a {len(talleres_creados)} taller(es) candidato(s)",
     )
-    if taller.usuario_id:
-        _crear_notificacion_evento(
-            db,
-            solicitud=solicitud,
-            usuario_id=taller.usuario_id,
-            titulo="Nueva solicitud para evaluar",
-            mensaje=f"Se te asignó {codigo_solicitud(solicitud)} en estado pendiente de respuesta",
-            tipo="asignacion_automatica",
-        )
     db.add(
         Auditoria(
             id=uuid.uuid4(),
             usuario_id=None,
-            accion="cu16_asignacion_automatica",
+            accion="cu16_candidatos_automaticos",
             modulo="asignacion",
-            detalle=f"Solicitud {solicitud.id} asignada a taller {taller.id} (puntaje={candidato.get('puntaje')})",
+            detalle=f"Solicitud {solicitud.id} enviada a {len(talleres_creados)} candidato(s)",
         )
     )
-    _incrementar_metrica_taller(db, taller_id=taller.id, codigo="cu16_asignaciones")
+    for taller in talleres_creados:
+        _incrementar_metrica_taller(db, taller_id=taller.id, codigo="cu16_candidatos")
     db.commit()
-    return taller
+    return talleres_creados[0]
 
 
 async def reasignar_taller(
@@ -786,10 +788,19 @@ def listar_solicitudes_servicio(
         estado_norm = _normalizar_estado_servicio(estado_norm)
     if estado_norm and estado_norm not in {
         "pendiente",
+        "buscando_talleres",
+        "esperando_respuestas",
+        "esperando_cotizaciones",
+        "cotizaciones_recibidas",
+        "taller_confirmado",
         "en_evaluacion",
         "aprobada",
         "rechazada",
         "pendiente_respuesta",
+        "aceptada_para_cotizar",
+        "cotizacion_enviada",
+        "confirmada",
+        "descartada",
         "aceptada",
         "tecnico_asignado",
         "en_camino",
@@ -918,16 +929,16 @@ def evaluar_solicitud_servicio(
             if carga_activa >= capacidad_max:
                 raise HTTPException(status_code=400, detail="El taller no tiene capacidad disponible")
 
-            asig_actual.estado = "aceptada"
+            asig_actual.estado = "aceptada_para_cotizar"
             asig_actual.motivo_rechazo = None
             asig_actual.fecha_aceptacion = local_now_naive()
-            nuevo = "aceptada"
+            nuevo = "esperando_cotizaciones"
             _guardar_historial(
                 db,
                 solicitud,
                 estado_anterior,
                 nuevo,
-                observacion or f"Solicitud aceptada por taller {mi_taller.nombre}",
+                observacion or f"Taller {mi_taller.nombre} aceptó participar y puede cotizar",
             )
             db.add(
                 Auditoria(
@@ -944,12 +955,11 @@ def evaluar_solicitud_servicio(
                     solicitud=solicitud,
                     usuario_id=solicitud.cliente.usuario_id,
                     titulo="Solicitud aceptada",
-                    mensaje=f"Tu solicitud {codigo_solicitud(solicitud)} fue aceptada por el taller",
+                    mensaje=f"Un taller aceptó revisar tu solicitud {codigo_solicitud(solicitud)} y preparará una cotización",
                     tipo="evaluacion_aceptada",
                 )
             _incrementar_metrica_taller(db, taller_id=mi_taller.id, codigo="cu15_aceptada")
     else:
-            # Rechazo con intento de reasignación
             asig_actual.estado = "rechazada"
             asig_actual.motivo_rechazo = observacion or "Rechazada por taller"
             db.add(
@@ -962,99 +972,36 @@ def evaluar_solicitud_servicio(
                 )
             )
 
-            lat, lng = _get_ubicacion_incidente(solicitud)
-            tipo = (solicitud.emergencia.tipo if solicitud.emergencia else None) or "otro"
-            prioridad = int(solicitud.prioridad or 2)
-            nuevo_taller = None
-            candidato = None
-            if lat is not None and lng is not None:
-                candidatos = asyncio.run(
-                    listar_candidatos(
-                        db,
-                        lat=lat,
-                        lng=lng,
-                        tipo=tipo,
-                        prioridad=prioridad,
-                        tenant_id=tenant_id_from(solicitud),
-                    )
-                )
-                for c in candidatos:
-                    cid = str(c.get("taller_id"))
-                    if cid == str(mi_taller.id):
-                        continue
-                    ya_rechazado = any(
-                        str(a.taller_id) == cid and (a.estado or "").lower() == "rechazada"
-                        for a in (solicitud.asignaciones or [])
-                    )
-                    if ya_rechazado:
-                        continue
-                    candidato = c
-                    break
-            if candidato:
-                nuevo_taller = db.query(Taller).filter(Taller.id == candidato["taller_id"]).first()
-
-            estado_anterior = solicitud.estado
-            if nuevo_taller:
-                db.add(
-                    Asignacion(
-                        id=uuid.uuid4(),
-                        tenant_id=tenant_id_from(solicitud, nuevo_taller),
-                        solicitud_id=solicitud.id,
-                        incidente_id=solicitud.incidente_id,
-                        taller_id=nuevo_taller.id,
-                        tecnico_id=None,
-                        fecha_asignacion=local_now_naive(),
-                        distancia_km=float(candidato.get("distancia_km", 0) or 0),
-                        puntaje=float(candidato.get("puntaje", 0) or 0),
-                        motivo_asignacion=str(candidato.get("motivo") or "Reasignación por rechazo de taller"),
-                        origen_asignacion="reasignacion",
-                        estado="pendiente_respuesta",
-                    )
-                )
-                nuevo = "asignada"
-                _guardar_historial(
+            restantes = [
+                a
+                for a in (solicitud.asignaciones or [])
+                if (a.estado or "").lower() in {"pendiente_respuesta", "aceptada_para_cotizar", "cotizacion_enviada"}
+            ]
+            nuevo = "esperando_respuestas" if restantes else "cancelada"
+            _guardar_historial(
+                db,
+                solicitud,
+                estado_anterior,
+                nuevo,
+                (
+                    f"Taller {mi_taller.nombre} rechazó participar"
+                    if restantes
+                    else "Todos los talleres candidatos rechazaron la solicitud"
+                ),
+            )
+            if solicitud.cliente:
+                _crear_notificacion_evento(
                     db,
-                    solicitud,
-                    estado_anterior,
-                    nuevo,
-                    f"Reasignada automáticamente al taller {nuevo_taller.nombre}",
+                    solicitud=solicitud,
+                    usuario_id=solicitud.cliente.usuario_id,
+                    titulo="Respuesta de taller",
+                    mensaje=(
+                        "Un taller rechazó participar; seguimos esperando otras respuestas"
+                        if restantes
+                        else "No hay talleres disponibles para esta solicitud"
+                    ),
+                    tipo="evaluacion_rechazada",
                 )
-                if nuevo_taller.usuario_id:
-                    _crear_notificacion_evento(
-                        db,
-                        solicitud=solicitud,
-                        usuario_id=nuevo_taller.usuario_id,
-                        titulo="Nueva solicitud para evaluar",
-                        mensaje=f"Se te asignó la solicitud {codigo_solicitud(solicitud)} para evaluación",
-                        tipo="evaluacion_pendiente",
-                    )
-                if solicitud.cliente:
-                    _crear_notificacion_evento(
-                        db,
-                        solicitud=solicitud,
-                        usuario_id=solicitud.cliente.usuario_id,
-                        titulo="Solicitud reasignada",
-                        mensaje=f"Tu solicitud {codigo_solicitud(solicitud)} está siendo reasignada a otro taller",
-                        tipo="reasignacion",
-                    )
-            else:
-                nuevo = "sin_taller_disponible"
-                _guardar_historial(
-                    db,
-                    solicitud,
-                    estado_anterior,
-                    nuevo,
-                    "No hay talleres candidatos disponibles tras el rechazo",
-                )
-                if solicitud.cliente:
-                    _crear_notificacion_evento(
-                        db,
-                        solicitud=solicitud,
-                        usuario_id=solicitud.cliente.usuario_id,
-                        titulo="Sin taller disponible",
-                        mensaje=f"No se encontró taller disponible para la solicitud {codigo_solicitud(solicitud)}",
-                        tipo="sin_taller_disponible",
-                    )
             _incrementar_metrica_taller(db, taller_id=mi_taller.id, codigo="cu15_rechazada")
 
     db.commit()
@@ -1079,8 +1026,8 @@ def asignar_servicio(
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     if solicitud.estado in {"completada", "finalizado", "cancelada", "cancelado", "rechazada"}:
         raise HTTPException(status_code=400, detail="La solicitud ya fue cerrada")
-    if solicitud.estado not in {"aceptada", "tecnico_asignado", "en_camino", "en_proceso"}:
-        raise HTTPException(status_code=400, detail="Solo se puede asignar técnico a una solicitud aceptada/asignada")
+    if solicitud.estado not in {"taller_confirmado", "tecnico_asignado", "en_camino", "en_proceso"}:
+        raise HTTPException(status_code=400, detail="Solo se puede asignar técnico cuando el cliente confirmó un taller")
 
     servicio_key = (servicio or "").strip().lower().replace(" ", "_")
     if servicio_key not in CATALOGO_SERVICIOS:
@@ -1095,8 +1042,8 @@ def asignar_servicio(
     asig_actual = _get_ultima_asignacion_taller(solicitud, taller_asig)
     if not asig_actual:
         raise HTTPException(status_code=403, detail="La solicitud no tiene asignación activa para este taller")
-    if _normalizar_estado_servicio(asig_actual.estado) not in {"aceptada", "tecnico_asignado", "en_camino", "en_proceso"}:
-        raise HTTPException(status_code=400, detail="La asignación actual no permite asignar técnico")
+    if _normalizar_estado_servicio(asig_actual.estado) not in {"confirmada", "tecnico_asignado", "en_camino", "en_proceso"}:
+        raise HTTPException(status_code=400, detail="La asignación debe estar confirmada para asignar técnico")
 
     tec = db.query(Tecnico).filter(Tecnico.id == tecnico_id).first()
     if not tec:

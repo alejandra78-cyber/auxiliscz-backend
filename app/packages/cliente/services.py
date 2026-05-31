@@ -16,7 +16,8 @@ CANCELABLE_STATES = {
     "asignado",
     "pendiente_respuesta",
     "pendiente_respuesta_taller",
-    "aceptada",
+    "esperando_respuestas",
+    "esperando_cotizaciones",
     "tecnico_asignado",
     "en_camino",
 }
@@ -301,16 +302,23 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
 def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
     estado_key = _estado_key(solicitud.estado)
     tiene_tecnico = False
-    if solicitud.asignaciones:
-        ultima = solicitud.asignaciones[-1]
-        tiene_tecnico = ultima.tecnico_id is not None
+    asignaciones = list(solicitud.asignaciones or [])
+    asignacion_definitiva = next(
+        (a for a in asignaciones if (a.estado or "").lower() in {"confirmada", "tecnico_asignado", "en_camino", "en_diagnostico", "diagnostico_completado", "en_proceso"}),
+        None,
+    )
+    if asignacion_definitiva:
+        tiene_tecnico = asignacion_definitiva.tecnico_id is not None
 
-    cotizacion = solicitud.cotizaciones[-1] if solicitud.cotizaciones else None
+    cotizaciones = list(solicitud.cotizaciones or [])
+    cotizacion = next((c for c in cotizaciones if _estado_key(c.estado) == "aceptada"), None)
+    if not cotizacion and cotizaciones:
+        cotizacion = sorted(cotizaciones, key=lambda c: c.creado_en or c.fecha_emision)[-1]
     pago = cotizacion.pago if cotizacion and cotizacion.pago else None
-    estado_cot = _estado_key(cotizacion.estado) if cotizacion else ""
+    hay_cotizaciones_responder = any(_estado_key(c.estado) in {"emitida", "pendiente", "enviada"} for c in cotizaciones)
 
     puede_ver_cotizacion = cotizacion is not None
-    puede_responder_cotizacion = bool(cotizacion and estado_cot in {"emitida", "pendiente", "enviada"})
+    puede_responder_cotizacion = hay_cotizaciones_responder
     puede_pagar = bool(
         cotizacion
         and estado_key in {"trabajo_completado", "esperando_pago"}
@@ -355,13 +363,16 @@ def _serializar_vehiculo(solicitud: Solicitud) -> dict | None:
 def _serializar_taller_tecnico(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
     if not solicitud.asignaciones:
         return None, None
-    asig = sorted(
+    asignaciones = sorted(
         solicitud.asignaciones,
         key=lambda a: (
+            1 if (a.es_definitiva or (a.estado or "").lower() in {"confirmada", "tecnico_asignado", "en_camino", "en_diagnostico", "diagnostico_completado", "en_proceso"}) else 0,
+            a.fecha_confirmacion.isoformat() if getattr(a, "fecha_confirmacion", None) else "",
             a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
             a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",
         ),
-    )[-1]
+    )
+    asig = asignaciones[-1]
     taller = None
     tecnico = None
     if asig.taller:
@@ -396,15 +407,21 @@ def _serializar_ubicacion(solicitud: Solicitud) -> dict | None:
 
 
 def _serializar_cotizacion_pago(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
-    cotizacion = solicitud.cotizaciones[-1] if solicitud.cotizaciones else None
+    cotizaciones = list(solicitud.cotizaciones or [])
+    cotizacion = next((c for c in cotizaciones if _estado_key(c.estado) == "aceptada"), None)
+    if not cotizacion and cotizaciones:
+        cotizacion = sorted(cotizaciones, key=lambda c: c.creado_en or c.fecha_emision)[-1]
     if not cotizacion:
         return None, None
     cot = {
         "id": str(cotizacion.id),
         "monto": cotizacion.monto,
+        "tiempo_estimado": getattr(cotizacion, "tiempo_estimado", None),
         "estado": cotizacion.estado,
         "detalle": cotizacion.detalle,
         "observaciones": cotizacion.observaciones,
+        "taller_nombre": cotizacion.taller.nombre if cotizacion.taller else None,
+        "taller_calificacion": cotizacion.taller.calificacion if cotizacion.taller else None,
         "validez_hasta": cotizacion.validez_hasta.isoformat() if cotizacion.validez_hasta else None,
         "fecha_respuesta_cliente": (
             cotizacion.fecha_respuesta_cliente.isoformat() if cotizacion.fecha_respuesta_cliente else None
@@ -423,6 +440,25 @@ def _serializar_cotizacion_pago(solicitud: Solicitud) -> tuple[dict | None, dict
         "metodo": pago.metodo,
         "pagado_en": pago.pagado_en.isoformat() if pago.pagado_en else None,
     }
+
+
+def _serializar_cotizaciones_disponibles(solicitud: Solicitud) -> list[dict]:
+    rows = []
+    for cot in sorted(solicitud.cotizaciones or [], key=lambda c: c.creado_en or c.fecha_emision):
+        rows.append(
+            {
+                "id": str(cot.id),
+                "monto": cot.monto,
+                "tiempo_estimado": getattr(cot, "tiempo_estimado", None),
+                "estado": cot.estado,
+                "detalle": cot.detalle,
+                "observaciones": cot.observaciones,
+                "taller_nombre": cot.taller.nombre if cot.taller else None,
+                "taller_calificacion": cot.taller.calificacion if cot.taller else None,
+                "fecha_emision": cot.fecha_emision.isoformat() if cot.fecha_emision else None,
+            }
+        )
+    return rows
 
 
 def _resolver_resumen_ia(solicitud: Solicitud) -> str | None:
@@ -479,6 +515,7 @@ def obtener_detalle_solicitud_cliente(db: Session, *, incidente_id: str, current
     taller, tecnico = _serializar_taller_tecnico(solicitud)
     ubicacion = _serializar_ubicacion(solicitud)
     cotizacion, pago = _serializar_cotizacion_pago(solicitud)
+    cotizaciones_disponibles = _serializar_cotizaciones_disponibles(solicitud)
     historial = [
         {
             "estado_anterior": h.estado_anterior,
@@ -504,6 +541,7 @@ def obtener_detalle_solicitud_cliente(db: Session, *, incidente_id: str, current
         "tecnico_asignado": tecnico,
         "historial": historial,
         "cotizacion_actual": cotizacion,
+        "cotizaciones_disponibles": cotizaciones_disponibles,
         "pago_actual": pago,
         "acciones_disponibles": _resolver_acciones_disponibles(solicitud),
     }
