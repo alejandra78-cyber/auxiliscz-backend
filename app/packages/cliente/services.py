@@ -1,4 +1,6 @@
 from fastapi import HTTPException
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 import uuid
@@ -34,6 +36,43 @@ from .repository import (
 
 def _estado_key(value: str | None) -> str:
     return (value or "").strip().lower().replace(" ", "_")
+
+
+ESTADOS_ASIGNACION_DEFINITIVA = {
+    "confirmada",
+    "tecnico_asignado",
+    "en_camino",
+    "en_diagnostico",
+    "diagnostico_completado",
+    "cotizacion_aceptada",
+    "en_proceso",
+    "trabajo_completado",
+    "esperando_pago",
+    "pagado",
+    "finalizado",
+}
+
+
+def _orden_asignacion_cliente(asignacion: Asignacion):
+    return (
+        getattr(asignacion, "fecha_confirmacion", None)
+        or getattr(asignacion, "fecha_asignacion", None)
+        or getattr(asignacion, "asignado_en", None)
+        or getattr(asignacion, "creado_en", None)
+        or datetime.min,
+        str(asignacion.id),
+    )
+
+
+def _asignacion_definitiva_cliente(solicitud: Solicitud) -> Asignacion | None:
+    asignaciones = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if getattr(a, "es_definitiva", False) or _estado_key(a.estado) in ESTADOS_ASIGNACION_DEFINITIVA
+    ]
+    if not asignaciones:
+        return None
+    return sorted(asignaciones, key=_orden_asignacion_cliente)[-1]
 
 
 def _normalizar_placa(placa: str) -> str:
@@ -204,12 +243,7 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
             "mensaje": "Aún no hay técnico asignado",
         }
 
-    asignacion = (
-        db.query(Asignacion)
-        .filter(Asignacion.solicitud_id == solicitud.id)
-        .order_by(Asignacion.fecha_asignacion.desc().nullslast(), Asignacion.asignado_en.desc().nullslast())
-        .first()
-    )
+    asignacion = _asignacion_definitiva_cliente(solicitud)
     if not asignacion or not asignacion.tecnico:
         return {
             "incidente_id": str(solicitud.id),
@@ -300,11 +334,7 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
 def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
     estado_key = _estado_key(solicitud.estado)
     tiene_tecnico = False
-    asignaciones = list(solicitud.asignaciones or [])
-    asignacion_definitiva = next(
-        (a for a in asignaciones if (a.estado or "").lower() in {"confirmada", "tecnico_asignado", "en_camino", "en_diagnostico", "diagnostico_completado", "en_proceso"}),
-        None,
-    )
+    asignacion_definitiva = _asignacion_definitiva_cliente(solicitud)
     if asignacion_definitiva:
         tiene_tecnico = asignacion_definitiva.tecnico_id is not None
 
@@ -359,37 +389,9 @@ def _serializar_vehiculo(solicitud: Solicitud) -> dict | None:
 
 
 def _serializar_taller_tecnico(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
-    if not solicitud.asignaciones:
+    asig = _asignacion_definitiva_cliente(solicitud)
+    if not asig:
         return None, None
-    estados_confirmados = {
-        "confirmada",
-        "tecnico_asignado",
-        "en_camino",
-        "en_diagnostico",
-        "diagnostico_completado",
-        "cotizacion_aceptada",
-        "en_proceso",
-        "trabajo_completado",
-        "esperando_pago",
-        "pagado",
-        "finalizado",
-    }
-    asignaciones = [
-        a
-        for a in (solicitud.asignaciones or [])
-        if a.es_definitiva or (a.estado or "").lower() in estados_confirmados
-    ]
-    if not asignaciones:
-        return None, None
-    asignaciones = sorted(
-        asignaciones,
-        key=lambda a: (
-            a.fecha_confirmacion.isoformat() if getattr(a, "fecha_confirmacion", None) else "",
-            a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
-            a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",
-        ),
-    )
-    asig = asignaciones[-1]
     taller = None
     tecnico = None
     if asig.taller:

@@ -168,11 +168,34 @@ def _get_ultimo_asignacion(solicitud: Solicitud) -> Asignacion | None:
     )[-1]
 
 
+def _prioridad_asignacion(a: Asignacion) -> tuple:
+    estados = {
+        "confirmada": 6,
+        "tecnico_asignado": 6,
+        "en_camino": 6,
+        "en_diagnostico": 6,
+        "diagnostico_completado": 6,
+        "en_proceso": 6,
+        "cotizacion_enviada": 5,
+        "aceptada_para_cotizar": 4,
+        "pendiente_respuesta": 3,
+        "descartada": 1,
+        "rechazada": 0,
+        "cancelada": 0,
+    }
+    return (
+        10 if getattr(a, "es_definitiva", False) else 0,
+        estados.get((a.estado or "").lower(), 2),
+        a.fecha_confirmacion or a.fecha_asignacion or a.asignado_en or datetime.min,
+        str(a.id),
+    )
+
+
 def _get_ultima_asignacion_taller(solicitud: Solicitud, taller_id: str) -> Asignacion | None:
     candidatas = [a for a in (solicitud.asignaciones or []) if a.taller_id and str(a.taller_id) == str(taller_id)]
     if not candidatas:
         return None
-    return sorted(candidatas, key=lambda x: (x.fecha_asignacion or x.asignado_en or datetime.min), reverse=True)[0]
+    return sorted(candidatas, key=_prioridad_asignacion)[-1]
 
 
 def _get_ubicacion_incidente(solicitud: Solicitud) -> tuple[float | None, float | None]:
@@ -496,6 +519,7 @@ def listar_tecnicos_disponibles(
         db.query(Tecnico)
         .filter(Tecnico.activo.is_(True), Tecnico.disponible.is_(True), Tecnico.estado_operativo == "disponible")
     )
+    mi_taller = None
     if current_user.rol == "taller":
         mi_taller = _obtener_taller_de_usuario(db, current_user)
         if not mi_taller:
@@ -508,9 +532,22 @@ def listar_tecnicos_disponibles(
         solicitud = _resolver_solicitud(db, solicitud_id)
         if not solicitud:
             raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-        ultima = _get_ultimo_asignacion(solicitud)
-        if ultima and ultima.taller_id:
-            q = q.filter(Tecnico.taller_id == ultima.taller_id)
+        if mi_taller:
+            propia = _get_ultima_asignacion_taller(solicitud, str(mi_taller.id))
+            if not propia:
+                raise HTTPException(status_code=403, detail="La solicitud no pertenece a tu taller")
+            if _normalizar_estado_servicio(propia.estado) not in {
+                "confirmada",
+                "tecnico_asignado",
+                "en_camino",
+                "en_proceso",
+            }:
+                raise HTTPException(status_code=400, detail="La solicitud aún no está confirmada para tu taller")
+        else:
+            ultima = next((a for a in (solicitud.asignaciones or []) if getattr(a, "es_definitiva", False)), None)
+            ultima = ultima or _get_ultimo_asignacion(solicitud)
+            if ultima and ultima.taller_id:
+                q = q.filter(Tecnico.taller_id == ultima.taller_id)
     return q.order_by(Tecnico.nombre.asc()).all()
 
 

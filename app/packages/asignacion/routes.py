@@ -58,6 +58,35 @@ def _asignacion_visible(i, current_user=None):
     asignaciones = list(i.asignaciones or [])
     if not asignaciones:
         return None
+    def _orden(a):
+        estados = {
+            "confirmada": 6,
+            "tecnico_asignado": 6,
+            "en_camino": 6,
+            "en_diagnostico": 6,
+            "diagnostico_completado": 6,
+            "en_proceso": 6,
+            "cotizacion_enviada": 5,
+            "aceptada_para_cotizar": 4,
+            "pendiente_respuesta": 3,
+            "descartada": 1,
+            "rechazada": 0,
+            "cancelada": 0,
+        }
+        return (
+            10 if getattr(a, "es_definitiva", False) else 0,
+            estados.get((getattr(a, "estado", None) or "").lower(), 2),
+            (
+                a.fecha_confirmacion.isoformat()
+                if getattr(a, "fecha_confirmacion", None)
+                else a.fecha_asignacion.isoformat()
+                if getattr(a, "fecha_asignacion", None)
+                else a.asignado_en.isoformat()
+                if getattr(a, "asignado_en", None)
+                else ""
+            ),
+            str(a.id),
+        )
     if current_user and getattr(current_user, "rol", None) == "taller":
         propia = [
             a
@@ -65,7 +94,7 @@ def _asignacion_visible(i, current_user=None):
             if getattr(getattr(a, "taller", None), "usuario_id", None) == current_user.id
         ]
         if propia:
-            return sorted(propia, key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id))[-1]
+            return sorted(propia, key=_orden)[-1]
     if current_user and getattr(current_user, "rol", None) == "tecnico":
         propia = [
             a
@@ -73,8 +102,8 @@ def _asignacion_visible(i, current_user=None):
             if getattr(getattr(a, "tecnico", None), "usuario_id", None) == current_user.id
         ]
         if propia:
-            return sorted(propia, key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id))[-1]
-    return sorted(asignaciones, key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id))[-1]
+            return sorted(propia, key=_orden)[-1]
+    return sorted(asignaciones, key=_orden)[-1]
 
 
 def _to_solicitud_out(i, current_user=None) -> SolicitudServicioOut:

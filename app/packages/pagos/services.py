@@ -89,16 +89,50 @@ def _ultimo_asignacion(solicitud: Solicitud) -> Asignacion | None:
     )[-1]
 
 
+def _orden_asignacion(a: Asignacion):
+    return (
+        a.fecha_confirmacion or a.fecha_asignacion or a.asignado_en or datetime.min,
+        str(a.id),
+    )
+
+
+def _asignacion_de_taller(solicitud: Solicitud | None, taller_id) -> Asignacion | None:
+    if not solicitud or not taller_id:
+        return None
+    candidatas = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if a.taller_id and str(a.taller_id) == str(taller_id)
+    ]
+    if not candidatas:
+        return None
+
+    prioridad = {
+        "confirmada": 4,
+        "tecnico_asignado": 4,
+        "en_camino": 4,
+        "en_diagnostico": 4,
+        "diagnostico_completado": 4,
+        "en_proceso": 4,
+        "cotizacion_enviada": 3,
+        "aceptada_para_cotizar": 2,
+        "pendiente_respuesta": 1,
+    }
+    return sorted(
+        candidatas,
+        key=lambda a: (
+            10 if getattr(a, "es_definitiva", False) else 0,
+            prioridad.get((a.estado or "").lower(), 0),
+            *_orden_asignacion(a),
+        ),
+    )[-1]
+
+
 def _asignacion_de_cotizacion(cot: Cotizacion, solicitud: Solicitud | None = None) -> Asignacion | None:
-    if cot.asignacion:
+    if cot.asignacion and (not cot.taller_id or str(cot.asignacion.taller_id or "") == str(cot.taller_id)):
         return cot.asignacion
     solicitud = solicitud or cot.solicitud
-    if not solicitud or not cot.taller_id:
-        return None
-    return next(
-        (a for a in (solicitud.asignaciones or []) if str(a.taller_id or "") == str(cot.taller_id)),
-        None,
-    )
+    return _asignacion_de_taller(solicitud, cot.taller_id)
 
 
 def _resolver_taller_usuario(db: Session, current_user: Usuario) -> Taller | None:
@@ -228,20 +262,29 @@ def generar_cotizacion_taller(
     if not mi_taller:
         raise HTTPException(status_code=403, detail="El usuario no tiene perfil de taller")
 
-    asig = next(
-        (a for a in (solicitud.asignaciones or []) if str(a.taller_id or "") == str(mi_taller.id)),
-        None,
-    )
+    asig = _asignacion_de_taller(solicitud, mi_taller.id)
     if not asig:
         raise HTTPException(status_code=403, detail="La solicitud no pertenece a tu taller")
 
     estado_asig = (asig.estado or "").strip().lower()
-    estados_permitidos_cot = {"aceptada_para_cotizar", "cotizacion_enviada"}
+    estados_permitidos_cot = {"aceptada_para_cotizar"}
     if estado_asig not in estados_permitidos_cot:
         raise HTTPException(
             status_code=400,
-            detail="Debes aceptar participar antes de generar una cotización",
+            detail="Debes aceptar participar antes de generar una cotización o la solicitud ya fue cotizada",
         )
+
+    cotizacion_existente = (
+        db.query(Cotizacion)
+        .filter(
+            Cotizacion.solicitud_id == solicitud.id,
+            Cotizacion.taller_id == mi_taller.id,
+            Cotizacion.estado.in_(["pendiente", "enviada", "aceptada"]),
+        )
+        .first()
+    )
+    if cotizacion_existente:
+        raise HTTPException(status_code=409, detail="Ya enviaste una cotización para esta solicitud")
 
     validez_dt = None
     if (validez_hasta or "").strip():
