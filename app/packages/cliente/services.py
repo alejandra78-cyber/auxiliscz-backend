@@ -16,8 +16,6 @@ CANCELABLE_STATES = {
     "asignado",
     "pendiente_respuesta",
     "pendiente_respuesta_taller",
-    "esperando_respuestas",
-    "esperando_cotizaciones",
     "tecnico_asignado",
     "en_camino",
 }
@@ -363,10 +361,29 @@ def _serializar_vehiculo(solicitud: Solicitud) -> dict | None:
 def _serializar_taller_tecnico(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
     if not solicitud.asignaciones:
         return None, None
+    estados_confirmados = {
+        "confirmada",
+        "tecnico_asignado",
+        "en_camino",
+        "en_diagnostico",
+        "diagnostico_completado",
+        "cotizacion_aceptada",
+        "en_proceso",
+        "trabajo_completado",
+        "esperando_pago",
+        "pagado",
+        "finalizado",
+    }
+    asignaciones = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if a.es_definitiva or (a.estado or "").lower() in estados_confirmados
+    ]
+    if not asignaciones:
+        return None, None
     asignaciones = sorted(
-        solicitud.asignaciones,
+        asignaciones,
         key=lambda a: (
-            1 if (a.es_definitiva or (a.estado or "").lower() in {"confirmada", "tecnico_asignado", "en_camino", "en_diagnostico", "diagnostico_completado", "en_proceso"}) else 0,
             a.fecha_confirmacion.isoformat() if getattr(a, "fecha_confirmacion", None) else "",
             a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
             a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",

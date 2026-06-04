@@ -34,6 +34,37 @@ from .services import (
     ver_ubicacion_tecnico,
 )
 
+
+def _asignacion_confirmada_cliente(solicitud):
+    estados_confirmados = {
+        "confirmada",
+        "tecnico_asignado",
+        "en_camino",
+        "en_diagnostico",
+        "diagnostico_completado",
+        "cotizacion_aceptada",
+        "en_proceso",
+        "trabajo_completado",
+        "esperando_pago",
+        "pagado",
+        "finalizado",
+    }
+    asignaciones = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if getattr(a, "es_definitiva", False) or (getattr(a, "estado", "") or "").lower() in estados_confirmados
+    ]
+    if not asignaciones:
+        return None
+    return sorted(
+        asignaciones,
+        key=lambda a: (
+            a.fecha_confirmacion.isoformat() if getattr(a, "fecha_confirmacion", None) else "",
+            a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
+            a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",
+        ),
+    )[-1]
+
 router = APIRouter()
 
 
@@ -111,7 +142,7 @@ def estado_ultima_solicitud_cliente_endpoint(
     current_user=Depends(get_current_user),
 ):
     solicitud = consultar_estado_ultima_solicitud_cliente(db, current_user=current_user)
-    ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
+    ultimo = _asignacion_confirmada_cliente(solicitud)
     tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
@@ -131,7 +162,7 @@ def estado_solicitud_cliente_endpoint(
     current_user=Depends(get_current_user),
 ):
     solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
-    ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
+    ultimo = _asignacion_confirmada_cliente(solicitud)
     tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),

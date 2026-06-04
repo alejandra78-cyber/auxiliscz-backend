@@ -560,8 +560,13 @@ async def asignar_taller_automaticamente(
         if (a.estado or "").lower()
         in {"pendiente_respuesta", "aceptada_para_cotizar", "cotizacion_enviada", "confirmada"}
     ]
-    if existentes_candidatas:
+    if len(existentes_candidatas) >= 3:
         raise HTTPException(status_code=400, detail="La solicitud ya tiene candidatos activos")
+    talleres_existentes = {
+        str(a.taller_id)
+        for a in existentes_candidatas
+        if getattr(a, "taller_id", None)
+    }
 
     if lat is None or lng is None:
         lat_calc, lng_calc = _get_ubicacion_incidente(solicitud)
@@ -588,9 +593,14 @@ async def asignar_taller_automaticamente(
         db.commit()
         return None
     talleres_creados: list[Taller] = []
-    for candidato in candidatos[:3]:
+    objetivo_candidatos = 3
+    for candidato in candidatos:
+        if len(existentes_candidatas) + len(talleres_creados) >= objetivo_candidatos:
+            break
         taller_id = candidato.get("taller_id")
         if not taller_id:
+            continue
+        if str(taller_id) in talleres_existentes:
             continue
         taller = None
         try:
@@ -602,6 +612,7 @@ async def asignar_taller_automaticamente(
             taller = next((t for t in db.query(Taller).all() if str(t.id) == str(taller_id)), None)
         if not taller:
             continue
+        talleres_existentes.add(str(taller.id))
         talleres_creados.append(taller)
         db.add(
             Asignacion(
@@ -631,6 +642,10 @@ async def asignar_taller_automaticamente(
                 tipo="solicitud_candidata",
             )
     if not talleres_creados:
+        if existentes_candidatas:
+            db.commit()
+            primer_taller = existentes_candidatas[0].taller if existentes_candidatas[0].taller else None
+            return primer_taller
         _marcar_sin_taller_disponible(db, solicitud, "No se pudo resolver ningún taller candidato")
         db.commit()
         return None
@@ -639,7 +654,10 @@ async def asignar_taller_automaticamente(
         solicitud=solicitud,
         anterior=solicitud.estado,
         nuevo="esperando_respuestas",
-        comentario=f"Solicitud enviada a {len(talleres_creados)} taller(es) candidato(s)",
+        comentario=(
+            f"Solicitud enviada a {len(existentes_candidatas) + len(talleres_creados)} "
+            "taller(es) candidato(s)"
+        ),
     )
     db.add(
         Auditoria(
@@ -647,7 +665,10 @@ async def asignar_taller_automaticamente(
             usuario_id=None,
             accion="cu16_candidatos_automaticos",
             modulo="asignacion",
-            detalle=f"Solicitud {solicitud.id} enviada a {len(talleres_creados)} candidato(s)",
+            detalle=(
+                f"Solicitud {solicitud.id} enviada a "
+                f"{len(existentes_candidatas) + len(talleres_creados)} candidato(s)"
+            ),
         )
     )
     for taller in talleres_creados:

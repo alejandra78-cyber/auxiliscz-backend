@@ -116,9 +116,12 @@ class HistorialEstadoOut(BaseModel):
 class CotizacionActualOut(BaseModel):
     id: str
     monto: float
+    tiempo_estimado: str | None = None
     estado: str
     detalle: str | None = None
     observaciones: str | None = None
+    taller_nombre: str | None = None
+    taller_calificacion: float | None = None
     validez_hasta: str | None = None
     fecha_respuesta_cliente: str | None = None
     creado_en: str | None = None
@@ -160,6 +163,7 @@ class SolicitudClienteDetalleOut(BaseModel):
     tecnico_asignado: SolicitudTecnicoOut | None = None
     historial: list[HistorialEstadoOut] = []
     cotizacion_actual: CotizacionActualOut | None = None
+    cotizaciones_disponibles: list[CotizacionActualOut] = Field(default_factory=list)
     pago_actual: PagoActualOut | None = None
     acciones_disponibles: SolicitudAccionesOut
 

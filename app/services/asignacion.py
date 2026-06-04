@@ -12,13 +12,24 @@ import json
 
 RADIO_BUSQUEDA_KM = 15  # Radio máximo de búsqueda en Santa Cruz
 ESTADOS_OPERATIVOS_NO_DISPONIBLES = {"cerrado", "fuera_de_servicio", "ocupado"}
-ESTADOS_ASIGNACION_ACTIVA = {"pendiente_respuesta", "aceptada", "asignada", "en_proceso"}
+ESTADOS_ASIGNACION_ACTIVA = {
+    "confirmada",
+    "aceptada",
+    "asignada",
+    "tecnico_asignado",
+    "en_camino",
+    "en_diagnostico",
+    "diagnostico_completado",
+    "cotizacion_aceptada",
+    "en_proceso",
+    "atendido",
+}
 
 SERVICIOS_POR_TIPO = {
     "bateria": ["bateria", "electrico", "general"],
     "llanta":  ["llanta", "goma", "neumatico", "general"],
     "motor":   ["motor", "mecanica", "general"],
-    "choque":  ["choque", "grua", "remolque", "carroceria", "general"],
+    "choque":  ["choque", "grua", "remolque", "carroceria", "motor", "mecanica", "electrico", "general"],
     "llave":   ["cerrajeria", "llave", "general"],
     "otro":    ["general"],
     "incierto": ["general"],
@@ -278,9 +289,12 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
         q_talleres = q_talleres.filter(Taller.tenant_id == tenant_id)
     todos_talleres = q_talleres.all()
     resultado = []
+    talleres_agregados: set[str] = set()
 
     def _append_candidatos(*, exigir_aprobado: bool, relajar_filtros: bool = False) -> None:
         for taller in todos_talleres:
+            if str(taller.id) in talleres_agregados:
+                continue
             if not (taller.latitud and taller.longitud):
                 continue
             distancia = haversine(lat, lng, taller.latitud, taller.longitud)
@@ -300,6 +314,7 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
             if tecnicos_disponibles <= 0:
                 puntaje -= 0.15
             estado_aprobacion = (getattr(taller, "estado_aprobacion", "pendiente") or "pendiente").strip().lower()
+            talleres_agregados.add(str(taller.id))
             resultado.append({
                 "taller_id": str(taller.id),
                 "nombre": taller.nombre,
@@ -321,10 +336,15 @@ async def listar_candidatos(db: Session, lat: float, lng: float, tipo: str, prio
             })
 
     _append_candidatos(exigir_aprobado=True)
+    if len(resultado) < 3:
+        # Si hay pocos candidatos exactos, completamos con talleres aprobados cercanos
+        # sin romper la regla central de CU32: enviar a 2 o 3 opciones reales.
+        _append_candidatos(exigir_aprobado=True, relajar_filtros=True)
     if not resultado:
-        # Fallback operativo: evita dejar solicitudes sin asignar en ambientes de pruebas
+        # Fallback operativo: evita dejar solicitudes sin candidatos en ambientes de prueba
+        # donde aún no se completó CU27 para todos los talleres.
         _append_candidatos(exigir_aprobado=False)
-    if not resultado:
+    if len(resultado) < 3:
         # Último fallback: candidatos por cercanía/disponibilidad básica.
         _append_candidatos(exigir_aprobado=False, relajar_filtros=True)
 

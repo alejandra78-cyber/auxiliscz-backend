@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.time import local_now
 from app.core.security import get_current_user
+from app.api.routes.websocket import manager
 
 from .schemas import TecnicoServicioAsignadoOut, TecnicoUbicacionIn, TecnicoUbicacionOut
 from .services import listar_mis_servicios_asignados, reportar_mi_ubicacion
@@ -19,18 +21,37 @@ def mis_servicios_asignados_endpoint(
 
 
 @router.post("/ubicacion", response_model=TecnicoUbicacionOut)
-def reportar_ubicacion_endpoint(
+async def reportar_ubicacion_endpoint(
     payload: TecnicoUbicacionIn,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    return reportar_mi_ubicacion(
+    resultado = reportar_mi_ubicacion(
         db,
         current_user=current_user,
         asignacion_id=payload.asignacion_id,
         latitud=payload.latitud,
         longitud=payload.longitud,
     )
+    incidente_id = resultado.get("incidente_id")
+    if incidente_id:
+        await manager.broadcast_tracking(
+            str(incidente_id),
+            {
+                "tipo": "ubicacion_tecnico",
+                "incidente_id": str(incidente_id),
+                "asignacion_id": payload.asignacion_id,
+                "estado_servicio": resultado.get("estado_servicio"),
+                "tecnico_nombre": resultado.get("tecnico_nombre"),
+                "latitud_tecnico": payload.latitud,
+                "longitud_tecnico": payload.longitud,
+                "latitud_cliente": resultado.get("latitud_cliente"),
+                "longitud_cliente": resultado.get("longitud_cliente"),
+                "ultima_actualizacion": resultado.get("ultima_actualizacion") or local_now().isoformat(),
+                "mensaje": "Ubicación del técnico actualizada en tiempo real",
+            },
+        )
+    return resultado
 
 
 __all__ = ["router"]

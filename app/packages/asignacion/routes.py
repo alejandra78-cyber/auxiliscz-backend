@@ -54,15 +54,31 @@ def _resolver_url_evidencia(ev) -> str | None:
     return f"/uploads/emergencias/{filename}"
 
 
-def _to_solicitud_out(i) -> SolicitudServicioOut:
-    ultimo = (
-        sorted(
-            i.asignaciones,
-            key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id),
-        )[-1]
-        if i.asignaciones
-        else None
-    )
+def _asignacion_visible(i, current_user=None):
+    asignaciones = list(i.asignaciones or [])
+    if not asignaciones:
+        return None
+    if current_user and getattr(current_user, "rol", None) == "taller":
+        propia = [
+            a
+            for a in asignaciones
+            if getattr(getattr(a, "taller", None), "usuario_id", None) == current_user.id
+        ]
+        if propia:
+            return sorted(propia, key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id))[-1]
+    if current_user and getattr(current_user, "rol", None) == "tecnico":
+        propia = [
+            a
+            for a in asignaciones
+            if getattr(getattr(a, "tecnico", None), "usuario_id", None) == current_user.id
+        ]
+        if propia:
+            return sorted(propia, key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id))[-1]
+    return sorted(asignaciones, key=lambda x: (x.fecha_asignacion or x.asignado_en or x.id))[-1]
+
+
+def _to_solicitud_out(i, current_user=None) -> SolicitudServicioOut:
+    ultimo = _asignacion_visible(i, current_user)
     resumen_ia = None
     if getattr(i, "incidente", None) and getattr(i.incidente, "resumen_ia", None):
         resumen_ia = i.incidente.resumen_ia
@@ -135,8 +151,8 @@ def _to_solicitud_out(i) -> SolicitudServicioOut:
     )
 
 
-def _to_solicitud_detalle_out(i) -> SolicitudServicioDetalleOut:
-    base = _to_solicitud_out(i)
+def _to_solicitud_detalle_out(i, current_user=None) -> SolicitudServicioDetalleOut:
+    base = _to_solicitud_out(i, current_user)
     evidencias: list[EvidenciaOut] = []
     for link in (i.evidencias or []):
         ev = getattr(link, "evidencia", None)
@@ -251,7 +267,7 @@ def solicitudes(
         fecha_hasta=fecha_hasta,
         taller_id=taller_id,
     )
-    return [_to_solicitud_out(i) for i in rows]
+    return [_to_solicitud_out(i, current_user) for i in rows]
 
 
 @router.get("/solicitudes/{incidente_id}", response_model=SolicitudServicioDetalleOut)
@@ -261,7 +277,7 @@ def detalle_solicitud(
     current_user=Depends(get_current_user),
 ):
     row = obtener_detalle_solicitud_servicio(db, incidente_id=incidente_id, current_user=current_user)
-    return _to_solicitud_detalle_out(row)
+    return _to_solicitud_detalle_out(row, current_user)
 
 
 @router.get("/servicios/catalogo", response_model=list[ServicioCatalogoOut])
@@ -310,7 +326,7 @@ def evaluar(
         aprobar=payload.aprobar,
         observacion=payload.observacion,
     )
-    return _to_solicitud_out(i)
+    return _to_solicitud_out(i, current_user)
 
 
 @router.post("/solicitudes/{incidente_id}/aceptar", response_model=SolicitudServicioOut)
@@ -326,7 +342,7 @@ def aceptar_solicitud(
         aprobar=True,
         observacion=None,
     )
-    return _to_solicitud_out(i)
+    return _to_solicitud_out(i, current_user)
 
 
 @router.post("/solicitudes/{incidente_id}/rechazar", response_model=SolicitudServicioOut)
@@ -343,7 +359,7 @@ def rechazar_solicitud(
         aprobar=False,
         observacion=payload.motivo_rechazo,
     )
-    return _to_solicitud_out(i)
+    return _to_solicitud_out(i, current_user)
 
 
 @router.post("/solicitudes/{incidente_id}/asignar", response_model=SolicitudServicioOut)
@@ -362,7 +378,7 @@ def asignar_servicio_endpoint(
         taller_id=payload.taller_id,
         observacion=payload.observacion,
     )
-    return _to_solicitud_out(i)
+    return _to_solicitud_out(i, current_user)
 
 
 @router.patch("/solicitudes/{incidente_id}/estado", response_model=SolicitudServicioOut)
@@ -393,4 +409,4 @@ def actualizar_estado_endpoint(
             observacion=payload.observacion,
             tecnico_id=payload.tecnico_id,
         )
-    return _to_solicitud_out(i)
+    return _to_solicitud_out(i, current_user)

@@ -8,7 +8,15 @@ from app.core.time import local_now_naive
 from app.core.tenant import assert_same_tenant, tenant_id_from
 from app.models.models import Asignacion, Historial, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
 
-ESTADOS_COMPARTIR_UBICACION = {"tecnico_asignado", "en_camino", "en_diagnostico", "en_proceso"}
+ESTADOS_COMPARTIR_UBICACION = {
+    "tecnico_asignado",
+    "en_camino",
+    "en_diagnostico",
+    "diagnostico_completado",
+    "cotizacion_emitida",
+    "cotizacion_aceptada",
+    "en_proceso",
+}
 
 
 def _estado_key(value: str | None) -> str:
@@ -112,7 +120,7 @@ def reportar_mi_ubicacion(
     if estado not in ESTADOS_COMPARTIR_UBICACION:
         raise HTTPException(
             status_code=400,
-            detail="Solo puedes compartir ubicación en estados tecnico_asignado, en_camino, en_diagnostico o en_proceso",
+            detail="Solo puedes compartir ubicación mientras el servicio está activo",
         )
 
     solicitud = asignacion.solicitud
@@ -166,19 +174,20 @@ def reportar_mi_ubicacion(
         )
         estado_servicio = "en_camino"
 
+    lat_cli = None
+    lng_cli = None
+    if solicitud.emergencia and solicitud.emergencia.ubicaciones:
+        ubicaciones_cliente = [u for u in solicitud.emergencia.ubicaciones if (u.tipo or "cliente") != "tecnico"]
+        if ubicaciones_cliente:
+            ultima_cli = sorted(
+                ubicaciones_cliente,
+                key=lambda u: u.registrado_en or local_now_naive(),
+            )[-1]
+            lat_cli = float(ultima_cli.latitud)
+            lng_cli = float(ultima_cli.longitud)
+
     # Si el técnico está cerca del punto de emergencia, marcar llegada automáticamente.
     if estado_servicio == "en_camino":
-        lat_cli = None
-        lng_cli = None
-        if solicitud.emergencia and solicitud.emergencia.ubicaciones:
-            ubicaciones_cliente = [u for u in solicitud.emergencia.ubicaciones if (u.tipo or "cliente") != "tecnico"]
-            if ubicaciones_cliente:
-                ultima_cli = sorted(
-                    ubicaciones_cliente,
-                    key=lambda u: u.registrado_en or local_now_naive(),
-                )[-1]
-                lat_cli = float(ultima_cli.latitud)
-                lng_cli = float(ultima_cli.longitud)
         if lat_cli is not None and lng_cli is not None:
             distancia = _haversine_km(lat_f, lng_f, lat_cli, lng_cli)
             if distancia <= 0.12:
@@ -222,6 +231,13 @@ def reportar_mi_ubicacion(
     db.commit()
     return {
         "mensaje": "Ubicación enviada correctamente",
+        "incidente_id": str(solicitud.id),
+        "asignacion_id": str(asignacion.id),
+        "tecnico_nombre": tecnico.nombre,
         "estado_servicio": asignacion.estado or "tecnico_asignado",
+        "latitud_tecnico": lat_f,
+        "longitud_tecnico": lng_f,
+        "latitud_cliente": lat_cli,
+        "longitud_cliente": lng_cli,
         "ultima_actualizacion": ahora.isoformat(),
     }

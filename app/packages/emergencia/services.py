@@ -474,23 +474,26 @@ async def reportar_emergencia(
 
     db.commit()
 
-    # CU16 inmediato: asigna taller apenas se crea el incidente (sin esperar IA pesada).
-    try:
-        from app.packages.asignacion.services import asignar_taller_automaticamente
+    # CU16 inmediato solo cuando el tipo ya es confiable. Si el reporte viene
+    # solo con audio/imagen, esperamos la IA en segundo plano para no crear
+    # candidatos con tipo "incierto" y bloquear la asignación correcta.
+    if tipo_ia not in {"incierto", "otro"}:
+        try:
+            from app.packages.asignacion.services import asignar_taller_automaticamente
 
-        await asignar_taller_automaticamente(
-            db,
-            solicitud_id=str(solicitud.id),
-            lat=lat,
-            lng=lng,
-            tipo=tipo_ia,
-            prioridad=prioridad_ia,
-        )
-    except HTTPException:
-        # Si no hay candidato disponible, ya queda marcado por el servicio de asignación.
-        pass
-    except Exception:
-        logger.exception("Asignación automática inicial falló para solicitud=%s", solicitud.id)
+            await asignar_taller_automaticamente(
+                db,
+                solicitud_id=str(solicitud.id),
+                lat=lat,
+                lng=lng,
+                tipo=tipo_ia,
+                prioridad=prioridad_ia,
+            )
+        except HTTPException:
+            # Si no hay candidato disponible, ya queda marcado por el servicio de asignación.
+            pass
+        except Exception:
+            logger.exception("Asignación automática inicial falló para solicitud=%s", solicitud.id)
 
     background_tasks.add_task(
         _procesar_asignacion_automatica,
