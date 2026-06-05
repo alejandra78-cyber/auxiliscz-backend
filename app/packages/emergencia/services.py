@@ -17,7 +17,6 @@ from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
 from app.core.time import local_now_naive
 from app.models.models import Asignacion, OperacionOffline, Solicitud, Usuario, Vehiculo
-from app.services.notificaciones import enviar_push
 
 from .repository import (
     agregar_evidencia_solicitud,
@@ -1281,15 +1280,6 @@ async def enviar_mensaje_solicitud(
     db.commit()
     db.refresh(msg)
 
-    try:
-        if destinatario_id:
-            await enviar_push(
-                str(destinatario_id),
-                {"titulo": "Nuevo mensaje", "cuerpo": texto_limpio[:120], "tipo": "chat"},
-            )
-    except Exception:
-        pass
-
     return {
         "evidencia_id": str(msg.id),
         "autor_rol": current_user.rol,
@@ -1317,6 +1307,8 @@ def listar_notificaciones_solicitud(
     return [
         {
             "id": str(n.id),
+            "solicitud_id": str(n.solicitud_id) if n.solicitud_id else None,
+            "incidente_id": str(n.incidente_id) if n.incidente_id else None,
             "titulo": n.titulo,
             "mensaje": n.mensaje,
             "tipo": n.tipo,

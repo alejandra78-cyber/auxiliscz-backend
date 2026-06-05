@@ -61,9 +61,20 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
     return TokenOut(access_token=token)
 
 
+@router.post("/login1", response_model=TokenOut)
+def login_compat(payload: LoginIn, db: Session = Depends(get_db)):
+    token = iniciar_sesion(db, email=payload.email, password=payload.password)
+    return TokenOut(access_token=token)
+
+
 @router.post("/logout", response_model=LogoutOut)
 def logout():
     return cerrar_sesion()
+
+
+@router.get("/me", response_model=UsuarioOut)
+def me(current_user=Depends(get_current_user)):
+    return current_user
 
 
 @router.get("/roles/{rol}/permisos", response_model=RolPermisoOut)

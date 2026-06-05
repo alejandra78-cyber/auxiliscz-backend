@@ -49,6 +49,12 @@ class EstadoSolicitudClienteOut(BaseModel):
 class UbicacionTecnicoOut(BaseModel):
     incidente_id: str
     codigo_solicitud: str | None = None
+    tecnico: dict | None = None
+    cliente: dict | None = None
+    estado: str | None = None
+    estado_visible: str | None = None
+    distancia_restante_km: float | None = None
+    tiempo_estimado_llegada_min: int | None = None
     tecnico_nombre: str | None = None
     estado_servicio: str
     latitud_tecnico: float | None = None

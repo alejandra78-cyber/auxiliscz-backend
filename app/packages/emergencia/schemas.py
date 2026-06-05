@@ -68,6 +68,8 @@ class MensajeOut(BaseModel):
 
 class NotificacionOut(BaseModel):
     id: str
+    solicitud_id: str | None = None
+    incidente_id: str | None = None
     titulo: str
     mensaje: str
     tipo: str

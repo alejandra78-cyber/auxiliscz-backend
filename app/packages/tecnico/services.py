@@ -6,16 +6,25 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.time import local_now_naive
 from app.core.tenant import assert_same_tenant, tenant_id_from
+from app.services.notificaciones import enviar_push_db
 from app.models.models import Asignacion, Historial, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
 
 ESTADOS_COMPARTIR_UBICACION = {
     "tecnico_asignado",
     "en_camino",
+    "tecnico_en_lugar",
     "en_diagnostico",
     "diagnostico_completado",
+    "en_atencion",
     "cotizacion_emitida",
     "cotizacion_aceptada",
     "en_proceso",
+}
+
+ACCIONES_ESTADO_TECNICO = {
+    "llegue_al_lugar": ("tecnico_en_lugar", "El técnico llegó al lugar de la emergencia"),
+    "iniciar_atencion": ("en_proceso", "El técnico inició la atención del servicio"),
+    "finalizar_servicio": ("trabajo_completado", "El técnico finalizó la atención del servicio"),
 }
 
 
@@ -40,6 +49,37 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
     return 2 * radio * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _ultima_ubicacion_tecnico(db: Session, asignacion: Asignacion, tecnico: Tecnico) -> Ubicacion | None:
+    row = (
+        db.query(Ubicacion)
+        .filter(Ubicacion.asignacion_id == asignacion.id, Ubicacion.tecnico_id == tecnico.id)
+        .order_by(Ubicacion.registrado_en.desc())
+        .first()
+    )
+    if row:
+        return row
+    return (
+        db.query(Ubicacion)
+        .filter(Ubicacion.incidente_id == asignacion.incidente_id, Ubicacion.tecnico_id == tecnico.id)
+        .order_by(Ubicacion.registrado_en.desc())
+        .first()
+    )
+
+
+def _ultima_ubicacion_cliente(solicitud: Solicitud) -> tuple[float | None, float | None]:
+    if solicitud.incidente and solicitud.incidente.latitud is not None and solicitud.incidente.longitud is not None:
+        return float(solicitud.incidente.latitud), float(solicitud.incidente.longitud)
+    if solicitud.emergencia and solicitud.emergencia.ubicaciones:
+        ubicaciones_cliente = [u for u in solicitud.emergencia.ubicaciones if (u.tipo or "cliente") != "tecnico"]
+        if ubicaciones_cliente:
+            ultima_cli = sorted(
+                ubicaciones_cliente,
+                key=lambda u: u.registrado_en or local_now_naive(),
+            )[-1]
+            return float(ultima_cli.latitud), float(ultima_cli.longitud)
+    return None, None
 
 
 def listar_mis_servicios_asignados(db: Session, *, current_user: Usuario) -> list[dict]:
@@ -174,17 +214,7 @@ def reportar_mi_ubicacion(
         )
         estado_servicio = "en_camino"
 
-    lat_cli = None
-    lng_cli = None
-    if solicitud.emergencia and solicitud.emergencia.ubicaciones:
-        ubicaciones_cliente = [u for u in solicitud.emergencia.ubicaciones if (u.tipo or "cliente") != "tecnico"]
-        if ubicaciones_cliente:
-            ultima_cli = sorted(
-                ubicaciones_cliente,
-                key=lambda u: u.registrado_en or local_now_naive(),
-            )[-1]
-            lat_cli = float(ultima_cli.latitud)
-            lng_cli = float(ultima_cli.longitud)
+    lat_cli, lng_cli = _ultima_ubicacion_cliente(solicitud)
 
     # Si el técnico está cerca del punto de emergencia, marcar llegada automáticamente.
     if estado_servicio == "en_camino":
@@ -226,6 +256,17 @@ def reportar_mi_ubicacion(
                     estado="no_leida",
                 )
             )
+            enviar_push_db(
+                db,
+                usuario_id=solicitud.cliente.usuario_id,
+                payload={
+                    "titulo": "Técnico en seguimiento",
+                    "cuerpo": f"El técnico {tecnico.nombre} está compartiendo ubicación en tiempo real.",
+                    "tipo": "seguimiento_tecnico",
+                    "solicitud_id": solicitud.id,
+                    "incidente_id": solicitud.incidente_id or "",
+                },
+            )
 
     db.add(tecnico)
     db.commit()
@@ -237,6 +278,131 @@ def reportar_mi_ubicacion(
         "estado_servicio": asignacion.estado or "tecnico_asignado",
         "latitud_tecnico": lat_f,
         "longitud_tecnico": lng_f,
+        "latitud_cliente": lat_cli,
+        "longitud_cliente": lng_cli,
+        "ultima_actualizacion": ahora.isoformat(),
+    }
+
+
+def actualizar_estado_desde_tecnico(
+    db: Session,
+    *,
+    current_user: Usuario,
+    asignacion_id: str,
+    accion: str,
+) -> dict:
+    if current_user.rol != "tecnico":
+        raise HTTPException(status_code=403, detail="Solo técnico puede actualizar este seguimiento")
+
+    accion_key = _estado_key(accion)
+    if accion_key not in ACCIONES_ESTADO_TECNICO:
+        raise HTTPException(status_code=400, detail="Acción de seguimiento no válida")
+
+    tecnico = _obtener_tecnico_de_usuario(db, current_user)
+    asignacion = (
+        db.query(Asignacion)
+        .options(
+            joinedload(Asignacion.solicitud).joinedload(Solicitud.cliente),
+            joinedload(Asignacion.solicitud).joinedload(Solicitud.emergencia),
+        )
+        .filter(Asignacion.id == asignacion_id)
+        .first()
+    )
+    if not asignacion:
+        raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    assert_same_tenant(asignacion, current_user)
+    if str(asignacion.tecnico_id or "") != str(tecnico.id):
+        raise HTTPException(status_code=403, detail="No autorizado para esta asignación")
+
+    estado_actual = _estado_key(asignacion.estado)
+    if estado_actual in {"pendiente_respuesta", "aceptada_para_cotizar", "cotizacion_enviada", "descartada", "rechazada"}:
+        raise HTTPException(status_code=400, detail="El seguimiento aún no está habilitado para esta asignación")
+
+    nuevo_estado, comentario = ACCIONES_ESTADO_TECNICO[accion_key]
+    solicitud = asignacion.solicitud
+    if not solicitud:
+        raise HTTPException(status_code=400, detail="La asignación no tiene solicitud asociada")
+
+    anterior = asignacion.estado or solicitud.estado
+    asignacion.estado = nuevo_estado
+    solicitud.estado = nuevo_estado
+    if solicitud.incidente:
+        solicitud.incidente.estado = nuevo_estado
+    if solicitud.emergencia:
+        solicitud.emergencia.estado = nuevo_estado
+
+    if nuevo_estado in {"tecnico_en_lugar", "en_proceso"}:
+        tecnico.estado_operativo = "en_proceso"
+        tecnico.disponible = False
+    if nuevo_estado == "trabajo_completado":
+        tecnico.estado_operativo = "disponible"
+        tecnico.disponible = True
+
+    ahora = local_now_naive()
+    db.add(
+        Historial(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud, asignacion),
+            solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
+            estado_anterior=anterior,
+            estado_nuevo=nuevo_estado,
+            comentario=comentario,
+        )
+    )
+    if solicitud.cliente:
+        db.add(
+            Notificacion(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id_from(solicitud, asignacion),
+                usuario_id=solicitud.cliente.usuario_id,
+                solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
+                titulo="Seguimiento actualizado",
+                mensaje=comentario,
+                tipo="seguimiento_tecnico",
+                estado="no_leida",
+            )
+        )
+        enviar_push_db(
+            db,
+            usuario_id=solicitud.cliente.usuario_id,
+            payload={
+                "titulo": "Seguimiento actualizado",
+                "cuerpo": comentario,
+                "tipo": "seguimiento_tecnico",
+                "solicitud_id": solicitud.id,
+                "incidente_id": solicitud.incidente_id or "",
+            },
+        )
+
+    db.add(tecnico)
+    db.commit()
+
+    ultima_tecnico = _ultima_ubicacion_tecnico(db, asignacion, tecnico)
+    lat_tecnico = (
+        float(ultima_tecnico.latitud)
+        if ultima_tecnico
+        else float(tecnico.latitud_actual if tecnico.latitud_actual is not None else tecnico.lat_actual)
+        if (tecnico.latitud_actual is not None or tecnico.lat_actual is not None)
+        else None
+    )
+    lng_tecnico = (
+        float(ultima_tecnico.longitud)
+        if ultima_tecnico
+        else float(tecnico.longitud_actual if tecnico.longitud_actual is not None else tecnico.lng_actual)
+        if (tecnico.longitud_actual is not None or tecnico.lng_actual is not None)
+        else None
+    )
+    lat_cli, lng_cli = _ultima_ubicacion_cliente(solicitud)
+    return {
+        "mensaje": comentario,
+        "incidente_id": str(solicitud.id),
+        "asignacion_id": str(asignacion.id),
+        "tecnico_nombre": tecnico.nombre,
+        "estado_servicio": nuevo_estado,
+        "latitud_tecnico": lat_tecnico,
+        "longitud_tecnico": lng_tecnico,
         "latitud_cliente": lat_cli,
         "longitud_cliente": lng_cli,
         "ultima_actualizacion": ahora.isoformat(),

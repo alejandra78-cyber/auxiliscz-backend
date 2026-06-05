@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 from datetime import datetime
+import math
 
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,7 @@ ESTADOS_ASIGNACION_DEFINITIVA = {
     "confirmada",
     "tecnico_asignado",
     "en_camino",
+    "tecnico_en_lugar",
     "en_diagnostico",
     "diagnostico_completado",
     "cotizacion_aceptada",
@@ -51,6 +53,21 @@ ESTADOS_ASIGNACION_DEFINITIVA = {
     "pagado",
     "finalizado",
 }
+
+ESTADOS_TRACKING_PERMITIDOS_CLIENTE = {
+    "confirmada",
+    "tecnico_asignado",
+    "en_camino",
+    "tecnico_en_lugar",
+    "en_diagnostico",
+    "diagnostico_completado",
+    "en_atencion",
+    "en_proceso",
+    "trabajo_completado",
+    "finalizado",
+}
+
+VELOCIDAD_PROMEDIO_KMH = 30.0
 
 
 def _orden_asignacion_cliente(asignacion: Asignacion):
@@ -73,6 +90,110 @@ def _asignacion_definitiva_cliente(solicitud: Solicitud) -> Asignacion | None:
     if not asignaciones:
         return None
     return sorted(asignaciones, key=_orden_asignacion_cliente)[-1]
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radio_tierra = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return 2 * radio_tierra * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _estado_visible_tracking(estado: str | None, distancia_km: float | None = None) -> str:
+    key = _estado_key(estado)
+    if key == "finalizado":
+        return "Servicio finalizado"
+    if key in {"tecnico_en_lugar", "en_diagnostico", "diagnostico_completado"}:
+        return "El técnico llegó al lugar"
+    if key in {"en_atencion", "en_proceso", "trabajo_completado"}:
+        return "Servicio en atención"
+    if distancia_km is not None:
+        if distancia_km < 0.1:
+            return "El técnico está llegando"
+        if distancia_km <= 0.5:
+            return "El técnico está cerca"
+    if key in {"en_camino", "tecnico_asignado", "confirmada"}:
+        return "Técnico en camino"
+    return "Seguimiento del técnico"
+
+
+def _mensaje_tracking(estado: str | None, distancia_km: float | None = None) -> str:
+    key = _estado_key(estado)
+    if key in {"tecnico_en_lugar", "en_diagnostico", "diagnostico_completado"}:
+        return "El técnico llegó al lugar de la emergencia."
+    if key in {"en_atencion", "en_proceso", "trabajo_completado"}:
+        return "El servicio está siendo atendido."
+    if distancia_km is not None:
+        if distancia_km < 0.1:
+            return "El técnico está llegando a tu ubicación."
+        if distancia_km <= 0.5:
+            return "El técnico está muy cerca de tu ubicación."
+    return "El técnico se está acercando a tu ubicación."
+
+
+def _hora_corta(value) -> str | None:
+    if not value:
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%H:%M")
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime("%H:%M")
+    except Exception:
+        return str(value)
+
+
+def _tracking_response(
+    *,
+    solicitud: Solicitud,
+    asignacion: Asignacion | None,
+    tecnico_nombre: str | None,
+    lat_tecnico: float | None,
+    lng_tecnico: float | None,
+    lat_cliente: float | None,
+    lng_cliente: float | None,
+    ultima_actualizacion,
+    mensaje_fallback: str | None = None,
+) -> dict:
+    estado = str(asignacion.estado if asignacion and asignacion.estado else solicitud.estado)
+    distancia = None
+    eta = None
+    if lat_tecnico is not None and lng_tecnico is not None and lat_cliente is not None and lng_cliente is not None:
+        distancia = round(_haversine_km(float(lat_tecnico), float(lng_tecnico), float(lat_cliente), float(lng_cliente)), 2)
+        eta = max(1, round((distancia / VELOCIDAD_PROMEDIO_KMH) * 60))
+    estado_visible = _estado_visible_tracking(estado, distancia)
+    mensaje = mensaje_fallback or _mensaje_tracking(estado, distancia)
+    ultima = _hora_corta(ultima_actualizacion)
+    return {
+        "incidente_id": str(solicitud.id),
+        "codigo_solicitud": _codigo_solicitud(solicitud),
+        "tecnico": {
+            "nombre": tecnico_nombre,
+            "latitud": lat_tecnico,
+            "longitud": lng_tecnico,
+        },
+        "cliente": {
+            "latitud": lat_cliente,
+            "longitud": lng_cliente,
+        },
+        "estado": estado,
+        "estado_visible": estado_visible,
+        "distancia_restante_km": distancia,
+        "tiempo_estimado_llegada_min": eta,
+        "tecnico_nombre": tecnico_nombre,
+        "estado_servicio": estado,
+        "latitud_tecnico": lat_tecnico,
+        "longitud_tecnico": lng_tecnico,
+        "latitud_cliente": lat_cliente,
+        "longitud_cliente": lng_cliente,
+        "ultima_actualizacion": ultima,
+        "mensaje": mensaje,
+    }
 
 
 def _normalizar_placa(placa: str) -> str:
@@ -229,57 +350,33 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     if (not solicitud.cliente or str(solicitud.cliente.usuario_id) != str(current_user.id)) and current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
-    if not solicitud.asignaciones:
-        return {
-            "incidente_id": str(solicitud.id),
-            "codigo_solicitud": _codigo_solicitud(solicitud),
-            "tecnico_nombre": None,
-            "estado_servicio": str(solicitud.estado),
-            "latitud_tecnico": None,
-            "longitud_tecnico": None,
-            "latitud_cliente": None,
-            "longitud_cliente": None,
-            "ultima_actualizacion": None,
-            "mensaje": "Aún no hay técnico asignado",
-        }
-
     asignacion = _asignacion_definitiva_cliente(solicitud)
-    if not asignacion or not asignacion.tecnico:
-        return {
-            "incidente_id": str(solicitud.id),
-            "codigo_solicitud": _codigo_solicitud(solicitud),
-            "tecnico_nombre": None,
-            "estado_servicio": str(asignacion.estado if asignacion else solicitud.estado),
-            "latitud_tecnico": None,
-            "longitud_tecnico": None,
-            "latitud_cliente": None,
-            "longitud_cliente": None,
-            "ultima_actualizacion": None,
-            "mensaje": "Aún no hay técnico asignado",
-        }
+    if not solicitud.asignaciones or not asignacion or not asignacion.tecnico:
+        return _tracking_response(
+            solicitud=solicitud,
+            asignacion=asignacion,
+            tecnico_nombre=None,
+            lat_tecnico=None,
+            lng_tecnico=None,
+            lat_cliente=None,
+            lng_cliente=None,
+            ultima_actualizacion=None,
+            mensaje_fallback="Aún no hay técnico asignado.",
+        )
 
     estado_servicio = _estado_key(asignacion.estado or solicitud.estado)
-    if estado_servicio not in {
-        "tecnico_asignado",
-        "en_camino",
-        "en_diagnostico",
-        "diagnostico_completado",
-        "cotizacion_emitida",
-        "cotizacion_aceptada",
-        "en_proceso",
-    }:
-        return {
-            "incidente_id": str(solicitud.id),
-            "codigo_solicitud": _codigo_solicitud(solicitud),
-            "tecnico_nombre": asignacion.tecnico.nombre,
-            "estado_servicio": str(asignacion.estado or solicitud.estado),
-            "latitud_tecnico": None,
-            "longitud_tecnico": None,
-            "latitud_cliente": None,
-            "longitud_cliente": None,
-            "ultima_actualizacion": None,
-            "mensaje": "El técnico aún no inició el seguimiento.",
-        }
+    if estado_servicio not in ESTADOS_TRACKING_PERMITIDOS_CLIENTE:
+        return _tracking_response(
+            solicitud=solicitud,
+            asignacion=asignacion,
+            tecnico_nombre=asignacion.tecnico.nombre,
+            lat_tecnico=None,
+            lng_tecnico=None,
+            lat_cliente=None,
+            lng_cliente=None,
+            ultima_actualizacion=None,
+            mensaje_fallback="El seguimiento estará disponible cuando el taller confirme un técnico.",
+        )
 
     ultima_ubicacion = (
         db.query(Ubicacion)
@@ -311,24 +408,17 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         lat_cliente = ubic.latitud
         lng_cliente = ubic.longitud
 
-    return {
-        "incidente_id": str(solicitud.id),
-        "codigo_solicitud": _codigo_solicitud(solicitud),
-        "tecnico_nombre": asignacion.tecnico.nombre,
-        "estado_servicio": str(asignacion.estado or solicitud.estado),
-        "latitud_tecnico": ultima_ubicacion.latitud if ultima_ubicacion else None,
-        "longitud_tecnico": ultima_ubicacion.longitud if ultima_ubicacion else None,
-        "latitud_cliente": lat_cliente,
-        "longitud_cliente": lng_cliente,
-        "ultima_actualizacion": (
-            ultima_ubicacion.registrado_en.isoformat() if ultima_ubicacion and ultima_ubicacion.registrado_en else None
-        ),
-        "mensaje": (
-            "Ubicación del técnico obtenida"
-            if ultima_ubicacion
-            else "El técnico aún no inició el seguimiento."
-        ),
-    }
+    return _tracking_response(
+        solicitud=solicitud,
+        asignacion=asignacion,
+        tecnico_nombre=asignacion.tecnico.nombre,
+        lat_tecnico=ultima_ubicacion.latitud if ultima_ubicacion else None,
+        lng_tecnico=ultima_ubicacion.longitud if ultima_ubicacion else None,
+        lat_cliente=lat_cliente,
+        lng_cliente=lng_cliente,
+        ultima_actualizacion=ultima_ubicacion.registrado_en if ultima_ubicacion else None,
+        mensaje_fallback=None if ultima_ubicacion else "El técnico aún no inició el seguimiento.",
+    )
 
 
 def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
@@ -361,10 +451,12 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
         in {
             "tecnico_asignado",
             "en_camino",
+            "tecnico_en_lugar",
             "en_diagnostico",
             "diagnostico_completado",
             "cotizacion_emitida",
             "cotizacion_aceptada",
+            "en_atencion",
             "en_proceso",
         },
         "puede_ver_cotizacion": puede_ver_cotizacion,

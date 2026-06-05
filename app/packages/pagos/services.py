@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.time import local_now_naive
 from app.core.tenant import assert_same_tenant, stamp_tenant, tenant_id_from
+from app.services.notificaciones import enviar_push_db
 from app.models.models import (
     Asignacion,
     Cliente,
@@ -238,6 +239,17 @@ def _notificar(db: Session, *, usuario_id, solicitud: Solicitud, titulo: str, me
             tipo=tipo,
             estado="no_leida",
         )
+    )
+    enviar_push_db(
+        db,
+        usuario_id=usuario_id,
+        payload={
+            "titulo": titulo,
+            "cuerpo": mensaje,
+            "tipo": tipo,
+            "solicitud_id": solicitud.id,
+            "incidente_id": solicitud.incidente_id or "",
+        },
     )
 
 

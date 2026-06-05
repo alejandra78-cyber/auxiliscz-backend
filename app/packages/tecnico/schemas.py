@@ -13,6 +13,11 @@ class TecnicoUbicacionOut(BaseModel):
     ultima_actualizacion: str
 
 
+class TecnicoAccionEstadoIn(BaseModel):
+    asignacion_id: str
+    accion: str = Field(..., min_length=3, max_length=40)
+
+
 class TecnicoServicioAsignadoOut(BaseModel):
     asignacion_id: str
     incidente_id: str

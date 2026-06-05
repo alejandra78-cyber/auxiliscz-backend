@@ -4,6 +4,7 @@ import os
 from sqlalchemy.orm import Session, joinedload
 from app.core.tenant import stamp_tenant, tenant_id_from
 from app.core.time import local_now_naive
+from app.services.notificaciones import enviar_push_db
 
 from app.models.models import (
     Cliente,
@@ -292,6 +293,17 @@ def crear_notificacion(
             tipo=tipo,
             estado="no_leida",
         )
+    )
+    enviar_push_db(
+        db,
+        usuario_id=usuario_id,
+        payload={
+            "titulo": titulo,
+            "cuerpo": mensaje,
+            "tipo": tipo,
+            "solicitud_id": solicitud_id,
+            "incidente_id": incidente_id or "",
+        },
     )
 
 
