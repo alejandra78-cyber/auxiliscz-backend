@@ -92,6 +92,37 @@ class KpisTenantOut(BaseModel):
     nivel_cumplimiento_sla: float
 
 
+class ReputacionEvaluacionOut(BaseModel):
+    estrellas: int
+    comentario: str | None = None
+    fecha: str | None = None
+    cliente: str | None = None
+
+
+class ReputacionTallerOut(BaseModel):
+    taller_id: str
+    nombre_taller: str
+    estado_taller: str
+    calificacion_promedio: float | None = None
+    cantidad_evaluaciones: int
+    servicios_completados: int
+    servicios_cancelados: int
+    tiempo_promedio_respuesta_min: float | None = None
+    tiempo_promedio_finalizacion_min: float | None = None
+    cumplimiento_sla: float
+    monto_total_generado: float
+    distribucion_estrellas: dict[int, int]
+    ultimas_evaluaciones: list[ReputacionEvaluacionOut]
+
+
+class ReputacionTalleresOut(BaseModel):
+    talleres: list[ReputacionTallerOut]
+    talleres_activos: int
+    calificacion_promedio_general: float | None = None
+    talleres_baja_reputacion: int
+    servicios_evaluados: int
+
+
 def _parse_date_filter(value: str | None, *, end_of_day: bool = False) -> datetime | None:
     raw = (value or "").strip()
     if not raw:
@@ -368,6 +399,195 @@ def consultar_kpis_tenant(
         casos_cancelados=cancelados,
         nivel_cumplimiento_sla=round((sla_ok / sla_total) * 100, 2) if sla_total else 0.0,
     )
+
+
+@router.get("/reputacion-talleres", response_model=ReputacionTalleresOut)
+def listar_reputacion_talleres(
+    nombre: str | None = None,
+    estado: str | None = None,
+    calificacion_minima: float | None = None,
+    fecha_inicio: str | None = None,
+    fecha_fin: str | None = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _only_admin(current_user)
+    inicio = _parse_date_filter(fecha_inicio)
+    fin = _parse_date_filter(fecha_fin, end_of_day=True)
+    if inicio and fin and inicio > fin:
+        raise HTTPException(status_code=400, detail="fecha_inicio no puede ser mayor a fecha_fin")
+
+    query = db.query(Taller)
+    if (nombre or "").strip():
+        query = query.filter(Taller.nombre.ilike(f"%{nombre.strip()}%"))
+    if (estado or "").strip():
+        query = query.filter(Taller.estado_aprobacion == estado.strip().lower())
+    talleres_rows = query.order_by(Taller.nombre.asc()).all()
+
+    estados_completados = {"trabajo_completado", "finalizado", "pagado", "completado"}
+    estados_cancelados = {"cancelado", "cancelada", "cancelado_con_cobro", "rechazado", "rechazada", "no_atendido"}
+    salida: list[ReputacionTallerOut] = []
+
+    for taller in talleres_rows:
+        asignaciones = db.query(Asignacion).filter(Asignacion.taller_id == taller.id).all()
+        solicitudes_por_id: dict[str, Solicitud] = {}
+        asignaciones_filtradas: list[Asignacion] = []
+        for asignacion in asignaciones:
+            solicitud = asignacion.solicitud
+            if not solicitud:
+                continue
+            report_at = _report_time(solicitud)
+            if inicio and report_at and report_at < inicio:
+                continue
+            if fin and report_at and report_at > fin:
+                continue
+            solicitudes_por_id[str(solicitud.id)] = solicitud
+            asignaciones_filtradas.append(asignacion)
+
+        respuesta: list[float] = []
+        finalizacion: list[float] = []
+        servicios_completados = 0
+        servicios_cancelados = 0
+        sla_total = 0
+        sla_ok = 0
+
+        for solicitud in solicitudes_por_id.values():
+            asignaciones_solicitud = [a for a in asignaciones_filtradas if str(a.solicitud_id) == str(solicitud.id)]
+            asignacion = _first_assignment(asignaciones_solicitud)
+            report_at = _report_time(solicitud)
+            assigned_at = _assignment_time(asignacion)
+            completed_at = _completion_time(db, solicitud, asignacion)
+            arrived_at = _arrival_time(db, solicitud, asignacion)
+
+            response_minutes = _minutes_between(report_at, assigned_at)
+            if response_minutes is not None:
+                respuesta.append(response_minutes)
+            finish_minutes = _minutes_between(report_at, completed_at)
+            if finish_minutes is not None:
+                finalizacion.append(finish_minutes)
+
+            estado_solicitud = _estado_key(solicitud.estado)
+            if completed_at or estado_solicitud in estados_completados:
+                servicios_completados += 1
+            if estado_solicitud in estados_cancelados:
+                servicios_cancelados += 1
+
+            sla_reference = completed_at or arrived_at
+            sla_minutes = _minutes_between(report_at, sla_reference)
+            if sla_minutes is not None:
+                sla_total += 1
+                if sla_minutes <= 120:
+                    sla_ok += 1
+
+        evaluaciones_query = (
+            db.query(Evaluacion)
+            .join(Solicitud, Solicitud.id == Evaluacion.solicitud_id)
+            .join(Asignacion, Asignacion.solicitud_id == Solicitud.id)
+            .filter(Asignacion.taller_id == taller.id)
+        )
+        if inicio:
+            evaluaciones_query = evaluaciones_query.filter(Evaluacion.creado_en >= inicio)
+        if fin:
+            evaluaciones_query = evaluaciones_query.filter(Evaluacion.creado_en <= fin)
+        evaluaciones_unicas: dict[str, Evaluacion] = {}
+        for evaluacion in evaluaciones_query.order_by(Evaluacion.creado_en.desc()).all():
+            evaluaciones_unicas[str(evaluacion.id)] = evaluacion
+        evaluaciones = list(evaluaciones_unicas.values())
+
+        estrellas = [int(e.estrellas or 0) for e in evaluaciones if e.estrellas is not None]
+        calificacion = round(sum(estrellas) / len(estrellas), 2) if estrellas else None
+        if calificacion_minima is not None and (calificacion is None or calificacion < calificacion_minima):
+            continue
+
+        distribucion = {i: 0 for i in range(1, 6)}
+        for value in estrellas:
+            if value in distribucion:
+                distribucion[value] += 1
+
+        pagos_query = db.query(Pago).filter(Pago.taller_id == taller.id)
+        if inicio:
+            pagos_query = pagos_query.filter(or_(Pago.pagado_en == None, Pago.pagado_en >= inicio))
+        if fin:
+            pagos_query = pagos_query.filter(or_(Pago.pagado_en == None, Pago.pagado_en <= fin))
+        monto_total = round(sum(float(p.monto or 0) for p in pagos_query.all()), 2)
+
+        cumplimiento = round((sla_ok / sla_total) * 100, 2) if sla_total else 0.0
+        ultimas = []
+        for evaluacion in evaluaciones[:5]:
+            cliente_nombre = None
+            if evaluacion.solicitud and evaluacion.solicitud.cliente and evaluacion.solicitud.cliente.usuario:
+                cliente_nombre = evaluacion.solicitud.cliente.usuario.nombre
+            ultimas.append(
+                ReputacionEvaluacionOut(
+                    estrellas=int(evaluacion.estrellas or 0),
+                    comentario=evaluacion.comentario,
+                    fecha=evaluacion.creado_en.isoformat() if evaluacion.creado_en else None,
+                    cliente=cliente_nombre,
+                )
+            )
+
+        salida.append(
+            ReputacionTallerOut(
+                taller_id=str(taller.id),
+                nombre_taller=taller.nombre,
+                estado_taller=taller.estado_aprobacion or "pendiente",
+                calificacion_promedio=calificacion,
+                cantidad_evaluaciones=len(evaluaciones),
+                servicios_completados=servicios_completados,
+                servicios_cancelados=servicios_cancelados,
+                tiempo_promedio_respuesta_min=_avg(respuesta),
+                tiempo_promedio_finalizacion_min=_avg(finalizacion),
+                cumplimiento_sla=cumplimiento,
+                monto_total_generado=monto_total,
+                distribucion_estrellas=distribucion,
+                ultimas_evaluaciones=ultimas,
+            )
+        )
+
+    calificaciones = [t.calificacion_promedio for t in salida if t.calificacion_promedio is not None]
+    return ReputacionTalleresOut(
+        talleres=salida,
+        talleres_activos=sum(1 for t in salida if _estado_key(t.estado_taller) == "aprobado"),
+        calificacion_promedio_general=round(sum(calificaciones) / len(calificaciones), 2) if calificaciones else None,
+        talleres_baja_reputacion=sum(1 for t in salida if t.calificacion_promedio is not None and t.calificacion_promedio < 3),
+        servicios_evaluados=sum(t.cantidad_evaluaciones for t in salida),
+    )
+
+
+@router.patch("/reputacion-talleres/{taller_id}/suspender", response_model=ReputacionTallerOut)
+def suspender_taller_reputacion(
+    taller_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _only_admin(current_user)
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+    if not taller:
+        raise HTTPException(status_code=404, detail="Taller no encontrado")
+    taller.estado_aprobacion = "suspendido"
+    taller.disponible = False
+    taller.estado_operativo = "fuera_de_servicio"
+    db.commit()
+    resultado = listar_reputacion_talleres(nombre=taller.nombre, db=db, current_user=current_user)
+    return next(row for row in resultado.talleres if row.taller_id == str(taller.id))
+
+
+@router.patch("/reputacion-talleres/{taller_id}/reactivar", response_model=ReputacionTallerOut)
+def reactivar_taller_reputacion(
+    taller_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    _only_admin(current_user)
+    taller = db.query(Taller).filter(Taller.id == taller_id).first()
+    if not taller:
+        raise HTTPException(status_code=404, detail="Taller no encontrado")
+    taller.estado_aprobacion = "aprobado"
+    taller.disponible = True
+    taller.estado_operativo = "disponible"
+    db.commit()
+    resultado = listar_reputacion_talleres(nombre=taller.nombre, db=db, current_user=current_user)
+    return next(row for row in resultado.talleres if row.taller_id == str(taller.id))
 
 
 @router.get("/usuarios/me")
