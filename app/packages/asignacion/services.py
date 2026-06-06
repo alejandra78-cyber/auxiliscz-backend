@@ -5,7 +5,7 @@ import math
 import asyncio
 
 from fastapi import HTTPException
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.models import (
     Asignacion,
@@ -550,6 +550,8 @@ def listar_tecnicos_disponibles(
                 raise HTTPException(status_code=403, detail="La solicitud no pertenece a tu taller")
             if _normalizar_estado_servicio(propia.estado) not in {
                 "confirmada",
+                "taller_confirmado",
+                "cotizacion_aceptada",
                 "tecnico_asignado",
                 "en_camino",
                 "en_proceso",
@@ -879,6 +881,8 @@ def listar_solicitudes_servicio(
         "cotizacion_emitida",
         "cotizacion_aceptada",
         "en_proceso",
+        "trabajo_completado",
+        "esperando_pago",
         "atendido",
         "finalizado",
         "cancelado",
@@ -887,12 +891,10 @@ def listar_solicitudes_servicio(
         raise HTTPException(status_code=400, detail="Filtro de estado inválido")
 
     q = db.query(Solicitud).options(
-        joinedload(Solicitud.emergencia),
-        joinedload(Solicitud.emergencia).joinedload(Emergencia.ubicaciones),
+        joinedload(Solicitud.emergencia).selectinload(Emergencia.ubicaciones),
         joinedload(Solicitud.cliente).joinedload(Cliente.usuario),
-        joinedload(Solicitud.asignaciones).joinedload(Asignacion.taller),
-        joinedload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
-        joinedload(Solicitud.evidencias).joinedload(SolicitudEvidencia.evidencia),
+        selectinload(Solicitud.asignaciones).joinedload(Asignacion.taller),
+        selectinload(Solicitud.asignaciones).joinedload(Asignacion.tecnico),
         joinedload(Solicitud.incidente),
     )
     if current_user.rol == "taller":
@@ -1096,7 +1098,7 @@ def asignar_servicio(
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     if solicitud.estado in {"completada", "finalizado", "cancelada", "cancelado", "rechazada"}:
         raise HTTPException(status_code=400, detail="La solicitud ya fue cerrada")
-    if solicitud.estado not in {"taller_confirmado", "tecnico_asignado", "en_camino", "en_proceso"}:
+    if solicitud.estado not in {"taller_confirmado", "cotizacion_aceptada", "confirmada", "tecnico_asignado", "en_camino", "en_proceso"}:
         raise HTTPException(status_code=400, detail="Solo se puede asignar técnico cuando el cliente confirmó un taller")
 
     servicio_key = (servicio or "").strip().lower().replace(" ", "_")
@@ -1112,7 +1114,7 @@ def asignar_servicio(
     asig_actual = _get_ultima_asignacion_taller(solicitud, taller_asig)
     if not asig_actual:
         raise HTTPException(status_code=403, detail="La solicitud no tiene asignación activa para este taller")
-    if _normalizar_estado_servicio(asig_actual.estado) not in {"confirmada", "tecnico_asignado", "en_camino", "en_proceso"}:
+    if _normalizar_estado_servicio(asig_actual.estado) not in {"confirmada", "taller_confirmado", "cotizacion_aceptada", "tecnico_asignado", "en_camino", "en_proceso"}:
         raise HTTPException(status_code=400, detail="La asignación debe estar confirmada para asignar técnico")
 
     tec = db.query(Tecnico).filter(Tecnico.id == tecnico_id).first()

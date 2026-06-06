@@ -18,6 +18,13 @@ class TecnicoAccionEstadoIn(BaseModel):
     accion: str = Field(..., min_length=3, max_length=40)
 
 
+class TrabajoCompletadoIn(BaseModel):
+    asignacion_id: str
+    descripcion: str = Field(..., min_length=5, max_length=4000)
+    observaciones: str | None = Field(default=None, max_length=2000)
+    evidencias: list[str] = Field(default_factory=list)
+
+
 class TecnicoServicioAsignadoOut(BaseModel):
     asignacion_id: str
     incidente_id: str

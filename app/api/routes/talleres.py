@@ -18,6 +18,7 @@ from app.core.tenant import DEFAULT_TENANT_ID, tenant_id_from
 from app.packages.tenant.services import crear_tenant_para_taller
 from app.core.time import local_now_naive
 from app.packages.auth.services import generar_token_activacion_cuenta
+from app.packages.pagos.services import _cotizacion_aceptada_solicitud, crear_o_actualizar_pago_pendiente
 from app.models.models import (
     Asignacion,
     Auditoria,
@@ -1830,6 +1831,16 @@ def completar_servicio(
             status_code=400,
             detail="Para completar el trabajo la solicitud debe estar en estado en_proceso o atendido",
         )
+    cot_aceptada = _cotizacion_aceptada_solicitud(solicitud, db)
+    if not cot_aceptada:
+        resumen = ", ".join(
+            f"{str(getattr(c, 'id', ''))}:{getattr(c, 'estado', '')}:{str(getattr(c, 'taller_id', ''))}"
+            for c in (solicitud.cotizaciones or [])
+        ) or "sin cotizaciones"
+        raise HTTPException(
+            status_code=400,
+            detail=f"No existe cotización aceptada para habilitar pago. solicitud_id={solicitud.id}. cotizaciones={resumen}",
+        )
 
     estado_anterior = solicitud.estado
     solicitud.estado = "trabajo_completado"
@@ -1837,7 +1848,7 @@ def completar_servicio(
         solicitud.emergencia.estado = "trabajo_completado"
     if solicitud.incidente:
         solicitud.incidente.estado = "trabajo_completado"
-    asig.estado = "atendido"
+    asig.estado = "trabajo_completado"
     asig.fecha_finalizacion = local_now_naive()
     if asig.tecnico:
         asig.tecnico.disponible = True
@@ -1882,6 +1893,7 @@ def completar_servicio(
     if solicitud.incidente:
         solicitud.incidente.estado = "esperando_pago"
     db.add(solicitud)
+    pago = crear_o_actualizar_pago_pendiente(db, cot=cot_aceptada, solicitud=solicitud)
     if solicitud.cliente:
         db.add(
             Notificacion(
@@ -1904,6 +1916,8 @@ def completar_servicio(
         "estado_anterior": estado_anterior,
         "estado_nuevo": solicitud.estado,
         "descripcion_trabajo": trabajo.descripcion,
+        "pago_id": str(pago.id),
+        "monto_total": float(pago.monto),
     }
 
 

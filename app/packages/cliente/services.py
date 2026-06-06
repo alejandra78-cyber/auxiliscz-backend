@@ -2,12 +2,13 @@ from fastapi import HTTPException
 from datetime import datetime
 import math
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 import uuid
 
 from app.core.tenant import assert_same_tenant, tenant_id_from
-from app.models.models import Asignacion, Cliente, Evaluacion, Pago, Solicitud, TrabajoCompletado, Ubicacion, Usuario
+from app.models.models import Asignacion, Cliente, Cotizacion, Evaluacion, Pago, Solicitud, TrabajoCompletado, Ubicacion, Usuario
 from app.packages.emergencia.services import cancelar_solicitud as cancelar_solicitud_emergencia
 
 CANCELABLE_STATES = {
@@ -19,8 +20,15 @@ CANCELABLE_STATES = {
     "asignado",
     "pendiente_respuesta",
     "pendiente_respuesta_taller",
+    "taller_confirmado",
+    "confirmada",
+    "cotizacion_aceptada",
     "tecnico_asignado",
     "en_camino",
+    "tecnico_en_lugar",
+    "en_diagnostico",
+    "en_atencion",
+    "en_proceso",
 }
 
 EVALUABLE_STATES = {"finalizado", "pagado", "servicio_completado", "completada", "completado"}
@@ -71,7 +79,22 @@ VELOCIDAD_PROMEDIO_KMH = 30.0
 
 
 def _orden_asignacion_cliente(asignacion: Asignacion):
+    estado = _estado_key(asignacion.estado)
+    prioridad_estado = {
+        "finalizado": 9,
+        "pagado": 8,
+        "esperando_pago": 7,
+        "trabajo_completado": 6,
+        "en_proceso": 5,
+        "en_diagnostico": 4,
+        "tecnico_en_lugar": 4,
+        "en_camino": 3,
+        "tecnico_asignado": 2,
+        "confirmada": 1,
+    }.get(estado, 0)
     return (
+        1 if getattr(asignacion, "es_definitiva", False) else 0,
+        prioridad_estado,
         getattr(asignacion, "fecha_confirmacion", None)
         or getattr(asignacion, "fecha_asignacion", None)
         or getattr(asignacion, "asignado_en", None)
@@ -81,7 +104,138 @@ def _orden_asignacion_cliente(asignacion: Asignacion):
     )
 
 
-def _asignacion_definitiva_cliente(solicitud: Solicitud) -> Asignacion | None:
+def _cotizacion_aceptada_cliente(solicitud: Solicitud, db: Session | None = None) -> Cotizacion | None:
+    cotizaciones = _cotizaciones_solicitud(solicitud, db)
+    aceptadas = [
+        c
+        for c in cotizaciones
+        if _estado_key(c.estado) == "aceptada" and str(c.solicitud_id or "") == str(solicitud.id)
+    ]
+    if aceptadas:
+        return sorted(
+            aceptadas,
+            key=lambda c: (
+                c.fecha_respuesta_cliente or c.actualizado_en or c.creado_en or c.fecha_emision or datetime.min,
+                str(c.id),
+            ),
+        )[-1]
+
+    if db is None:
+        return None
+
+    estado_solicitud = _estado_key(solicitud.estado)
+    if estado_solicitud not in {
+        "taller_confirmado",
+        "confirmada",
+        "tecnico_asignado",
+        "en_camino",
+        "tecnico_en_lugar",
+        "en_diagnostico",
+        "en_atencion",
+        "en_proceso",
+        "trabajo_completado",
+        "esperando_pago",
+        "cancelado_con_cobro",
+        "finalizado",
+    }:
+        return None
+
+    asignaciones = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if a.taller_id
+        and (
+            getattr(a, "es_definitiva", False)
+            or _estado_key(a.estado) in ESTADOS_ASIGNACION_DEFINITIVA
+        )
+    ]
+    if not asignaciones:
+        return None
+
+    asig = sorted(asignaciones, key=_orden_asignacion_cliente)[-1]
+    candidatas = [
+        c
+        for c in cotizaciones
+        if str(c.solicitud_id or "") == str(solicitud.id)
+        and str(c.taller_id or "") == str(asig.taller_id)
+    ]
+    if not candidatas:
+        filtros = [Cotizacion.asignacion_id == asig.id]
+        if solicitud.incidente_id:
+            filtros.append(
+                (Cotizacion.incidente_id == solicitud.incidente_id)
+                & (Cotizacion.taller_id == asig.taller_id)
+            )
+        candidatas = (
+            db.query(Cotizacion)
+            .filter(or_(*filtros))
+            .order_by(Cotizacion.creado_en.desc().nullslast(), Cotizacion.fecha_emision.desc().nullslast())
+            .all()
+        )
+    if not candidatas:
+        return None
+
+    con_misma_asignacion = [
+        c for c in candidatas if c.asignacion_id and str(c.asignacion_id) == str(asig.id)
+    ]
+    candidata = sorted(
+        con_misma_asignacion or candidatas,
+        key=lambda c: (
+            c.fecha_respuesta_cliente or c.actualizado_en or c.creado_en or c.fecha_emision or datetime.min,
+            str(c.id),
+        ),
+    )[-1]
+
+    ahora = datetime.now()
+    candidata.estado = "aceptada"
+    candidata.solicitud_id = solicitud.id
+    candidata.incidente_id = candidata.incidente_id or solicitud.incidente_id
+    candidata.asignacion_id = candidata.asignacion_id or asig.id
+    candidata.taller_id = candidata.taller_id or asig.taller_id
+    candidata.cliente_id = candidata.cliente_id or solicitud.cliente_id
+    candidata.fecha_respuesta_cliente = candidata.fecha_respuesta_cliente or ahora
+    candidata.actualizado_en = ahora
+    asig.estado = asig.estado or "confirmada"
+    asig.es_definitiva = True
+    asig.tipo_asignacion = getattr(asig, "tipo_asignacion", None) or "definitiva"
+    asig.fecha_confirmacion = getattr(asig, "fecha_confirmacion", None) or ahora
+    for otra in cotizaciones:
+        if str(otra.id) == str(candidata.id):
+            continue
+        if _estado_key(otra.estado) in {"pendiente", "emitida", "enviada", "cotizacion_enviada", "aceptada"}:
+            otra.estado = "rechazada"
+            otra.actualizado_en = ahora
+    db.flush()
+    return candidata
+
+
+def _asignacion_definitiva_cliente(solicitud: Solicitud, db: Session | None = None) -> Asignacion | None:
+    cotizacion_aceptada = _cotizacion_aceptada_cliente(solicitud, db)
+    asig_cotizacion = None
+    if cotizacion_aceptada and cotizacion_aceptada.asignacion_id:
+        asig_cotizacion = next(
+            (
+                a
+                for a in (solicitud.asignaciones or [])
+                if str(a.id) == str(cotizacion_aceptada.asignacion_id)
+            ),
+            None,
+        )
+    if cotizacion_aceptada and cotizacion_aceptada.taller_id:
+        asignaciones_taller_cotizado = [
+            a
+            for a in (solicitud.asignaciones or [])
+            if str(a.taller_id or "") == str(cotizacion_aceptada.taller_id)
+            and (
+                getattr(a, "es_definitiva", False)
+                or _estado_key(a.estado) not in {"descartada", "rechazada", "cancelada", "cancelado"}
+            )
+        ]
+        if asignaciones_taller_cotizado:
+            return sorted(asignaciones_taller_cotizado, key=_orden_asignacion_cliente)[-1]
+    if asig_cotizacion:
+        return asig_cotizacion
+
     asignaciones = [
         a
         for a in (solicitud.asignaciones or [])
@@ -309,8 +463,10 @@ def consultar_estado_solicitud_cliente(db: Session, *, incidente_id: str, curren
         solicitud = db.query(Solicitud).filter(Solicitud.incidente_id == incidente_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
-    assert_same_tenant(solicitud, current_user)
-    if (not solicitud.cliente or str(solicitud.cliente.usuario_id) != str(current_user.id)) and current_user.rol != "admin":
+
+    es_dueno = bool(solicitud.cliente and str(solicitud.cliente.usuario_id) == str(current_user.id))
+    if current_user.rol != "admin" and not es_dueno:
+        assert_same_tenant(solicitud, current_user)
         raise HTTPException(status_code=403, detail="No autorizado")
     return solicitud
 
@@ -350,7 +506,7 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
         raise HTTPException(status_code=404, detail="Solicitud no encontrada")
     if (not solicitud.cliente or str(solicitud.cliente.usuario_id) != str(current_user.id)) and current_user.rol != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
-    asignacion = _asignacion_definitiva_cliente(solicitud)
+    asignacion = _asignacion_definitiva_cliente(solicitud, db)
     if not solicitud.asignaciones or not asignacion or not asignacion.tecnico:
         return _tracking_response(
             solicitud=solicitud,
@@ -421,17 +577,31 @@ def ver_ubicacion_tecnico(db: Session, *, incidente_id: str, current_user: Usuar
     )
 
 
-def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
+def _cotizaciones_solicitud(solicitud: Solicitud, db: Session | None = None) -> list[Cotizacion]:
+    if db is None:
+        return [
+            cot
+            for cot in (solicitud.cotizaciones or [])
+            if str(cot.solicitud_id or "") == str(solicitud.id)
+        ]
+
+    return (
+        db.query(Cotizacion)
+        .filter(Cotizacion.solicitud_id == solicitud.id)
+        .order_by(Cotizacion.creado_en.asc().nullslast(), Cotizacion.fecha_emision.asc().nullslast())
+        .all()
+    )
+
+
+def _resolver_acciones_disponibles(solicitud: Solicitud, db: Session | None = None) -> dict:
     estado_key = _estado_key(solicitud.estado)
     tiene_tecnico = False
-    asignacion_definitiva = _asignacion_definitiva_cliente(solicitud)
+    asignacion_definitiva = _asignacion_definitiva_cliente(solicitud, db)
     if asignacion_definitiva:
         tiene_tecnico = asignacion_definitiva.tecnico_id is not None
 
-    cotizaciones = list(solicitud.cotizaciones or [])
-    cotizacion = next((c for c in cotizaciones if _estado_key(c.estado) == "aceptada"), None)
-    if not cotizacion and cotizaciones:
-        cotizacion = sorted(cotizaciones, key=lambda c: c.creado_en or c.fecha_emision)[-1]
+    cotizaciones = _cotizaciones_solicitud(solicitud, db)
+    cotizacion = _cotizacion_aceptada_cliente(solicitud, db)
     pago = cotizacion.pago if cotizacion and cotizacion.pago else None
     hay_cotizaciones_responder = any(_estado_key(c.estado) in {"emitida", "pendiente", "enviada"} for c in cotizaciones)
 
@@ -439,10 +609,30 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
     puede_responder_cotizacion = hay_cotizaciones_responder
     puede_pagar = bool(
         cotizacion
-        and estado_key in {"trabajo_completado", "esperando_pago"}
+        and estado_key in {"trabajo_completado", "esperando_pago", "cancelado_con_cobro", "finalizado"}
         and (pago is None or _estado_key(pago.estado) in {"pendiente", "pendiente_pago", "pendiente_verificacion"})
     )
-    puede_evaluar = estado_key in {"finalizado", "servicio_completado", "pagado"}
+    pago_pagado = bool(pago and _estado_key(pago.estado) in {"pagado", "completado"})
+    puede_evaluar = estado_key in {"servicio_completado", "pagado"} or (estado_key == "finalizado" and pago_pagado)
+    motivo_pago_no_disponible = None
+    if estado_key in {"trabajo_completado", "esperando_pago", "cancelado_con_cobro", "finalizado"} and not puede_pagar:
+        if not cotizacion:
+            resumen = ", ".join(
+                f"{getattr(c.taller, 'nombre', 'sin_taller')}:{c.estado}"
+                for c in cotizaciones
+            ) or "sin cotizaciones registradas"
+            motivo_pago_no_disponible = (
+                f"No se encontró cotización aceptada para la solicitud {solicitud.id}. "
+                f"Cotizaciones actuales: {resumen}"
+            )
+        elif not asignacion_definitiva or not getattr(asignacion_definitiva, "es_definitiva", False):
+            motivo_pago_no_disponible = "No existe asignación confirmada para habilitar el pago."
+        elif not asignacion_definitiva.tecnico_id:
+            motivo_pago_no_disponible = "No existe técnico asignado en la asignación confirmada."
+        elif not pago:
+            motivo_pago_no_disponible = "El pago pendiente aún no fue creado para la cotización aceptada."
+        else:
+            motivo_pago_no_disponible = "El pago no está disponible en el estado actual."
 
     return {
         "puede_cancelar": estado_key in CANCELABLE_STATES,
@@ -462,6 +652,7 @@ def _resolver_acciones_disponibles(solicitud: Solicitud) -> dict:
         "puede_ver_cotizacion": puede_ver_cotizacion,
         "puede_responder_cotizacion": puede_responder_cotizacion,
         "puede_pagar": puede_pagar,
+        "motivo_pago_no_disponible": motivo_pago_no_disponible,
         "puede_evaluar_servicio": puede_evaluar,
     }
 
@@ -480,20 +671,25 @@ def _serializar_vehiculo(solicitud: Solicitud) -> dict | None:
     }
 
 
-def _serializar_taller_tecnico(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
-    asig = _asignacion_definitiva_cliente(solicitud)
-    if not asig:
-        return None, None
+def _serializar_taller_tecnico(solicitud: Solicitud, db: Session | None = None) -> tuple[dict | None, dict | None]:
+    asig = _asignacion_definitiva_cliente(solicitud, db)
+    cotizacion_aceptada = _cotizacion_aceptada_cliente(solicitud, db)
     taller = None
     tecnico = None
-    if asig.taller:
+    if cotizacion_aceptada and cotizacion_aceptada.taller:
+        taller = {
+            "id": str(cotizacion_aceptada.taller.id),
+            "nombre": cotizacion_aceptada.taller.nombre,
+            "estado": solicitud.estado,
+        }
+    elif asig and asig.taller:
         taller = {
             "id": str(asig.taller.id),
             "nombre": asig.taller.nombre,
             # Para cliente mostramos el estado global del servicio, no un estado técnico legado de asignación.
             "estado": solicitud.estado,
         }
-    if asig.tecnico:
+    if asig and asig.tecnico:
         tecnico = {
             "id": str(asig.tecnico.id),
             "nombre": asig.tecnico.nombre,
@@ -517,15 +713,14 @@ def _serializar_ubicacion(solicitud: Solicitud) -> dict | None:
     return None
 
 
-def _serializar_cotizacion_pago(solicitud: Solicitud) -> tuple[dict | None, dict | None]:
-    cotizaciones = list(solicitud.cotizaciones or [])
-    cotizacion = next((c for c in cotizaciones if _estado_key(c.estado) == "aceptada"), None)
-    if not cotizacion and cotizaciones:
-        cotizacion = sorted(cotizaciones, key=lambda c: c.creado_en or c.fecha_emision)[-1]
+def _serializar_cotizacion_pago(solicitud: Solicitud, db: Session | None = None) -> tuple[dict | None, dict | None]:
+    cotizacion = _cotizacion_aceptada_cliente(solicitud, db)
     if not cotizacion:
         return None, None
     cot = {
         "id": str(cotizacion.id),
+        "solicitud_id": str(cotizacion.solicitud_id) if cotizacion.solicitud_id else None,
+        "taller_id": str(cotizacion.taller_id) if cotizacion.taller_id else None,
         "monto": cotizacion.monto,
         "tiempo_estimado": getattr(cotizacion, "tiempo_estimado", None),
         "estado": cotizacion.estado,
@@ -540,25 +735,49 @@ def _serializar_cotizacion_pago(solicitud: Solicitud) -> tuple[dict | None, dict
         "creado_en": cotizacion.creado_en.isoformat() if cotizacion.creado_en else None,
     }
     pago: Pago | None = cotizacion.pago
+    if (
+        db is not None
+        and not pago
+        and _estado_key(cotizacion.estado) == "aceptada"
+        and _estado_key(solicitud.estado) in {"trabajo_completado", "esperando_pago", "cancelado_con_cobro", "finalizado"}
+    ):
+        from app.packages.pagos.services import crear_o_actualizar_pago_pendiente
+
+        es_cobro_visita = _estado_key(solicitud.estado) == "cancelado_con_cobro"
+        pago = crear_o_actualizar_pago_pendiente(
+            db,
+            cot=cotizacion,
+            solicitud=solicitud,
+            monto_total=(round(float(cotizacion.monto) * 0.30, 2) if es_cobro_visita else None),
+            tipo=("cobro_visita" if es_cobro_visita else "servicio"),
+        )
+        db.commit()
+        db.refresh(pago)
     if not pago:
         return cot, None
     return cot, {
         "id": str(pago.id),
         "estado": pago.estado,
-        "monto": cotizacion.monto,
+        "monto": pago.monto,
         "comision_plataforma": pago.comision_plataforma,
         "monto_taller": pago.monto_taller,
         "metodo": pago.metodo,
+        "referencia": pago.referencia,
+        "stripe_checkout_url": pago.comprobante_url if (pago.metodo or "").lower() == "stripe" else None,
         "pagado_en": pago.pagado_en.isoformat() if pago.pagado_en else None,
     }
 
 
-def _serializar_cotizaciones_disponibles(solicitud: Solicitud) -> list[dict]:
+def _serializar_cotizaciones_disponibles(solicitud: Solicitud, db: Session | None = None) -> list[dict]:
     rows = []
-    for cot in sorted(solicitud.cotizaciones or [], key=lambda c: c.creado_en or c.fecha_emision):
+    for cot in sorted(_cotizaciones_solicitud(solicitud, db), key=lambda c: c.creado_en or c.fecha_emision):
+        if _estado_key(cot.estado) not in {"pendiente", "emitida", "enviada", "cotizacion_enviada", "aceptada"}:
+            continue
         rows.append(
             {
                 "id": str(cot.id),
+                "solicitud_id": str(cot.solicitud_id) if cot.solicitud_id else None,
+                "taller_id": str(cot.taller_id) if cot.taller_id else None,
                 "monto": cot.monto,
                 "tiempo_estimado": getattr(cot, "tiempo_estimado", None),
                 "estado": cot.estado,
@@ -614,7 +833,7 @@ def listar_solicitudes_cliente(db: Session, *, current_user: Usuario) -> list[di
                 "tipo": tipo,
                 "fecha_reporte": s.creado_en.isoformat() if s.creado_en else None,
                 "vehiculo": _serializar_vehiculo(s),
-                "acciones_disponibles": _resolver_acciones_disponibles(s),
+                "acciones_disponibles": _resolver_acciones_disponibles(s, db),
             }
         )
     return rows
@@ -623,10 +842,11 @@ def listar_solicitudes_cliente(db: Session, *, current_user: Usuario) -> list[di
 def obtener_detalle_solicitud_cliente(db: Session, *, incidente_id: str, current_user: Usuario) -> dict:
     solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
     tipo, prioridad = _tipo_prioridad_actual(solicitud)
-    taller, tecnico = _serializar_taller_tecnico(solicitud)
+    taller, tecnico = _serializar_taller_tecnico(solicitud, db)
     ubicacion = _serializar_ubicacion(solicitud)
-    cotizacion, pago = _serializar_cotizacion_pago(solicitud)
-    cotizaciones_disponibles = _serializar_cotizaciones_disponibles(solicitud)
+    cotizacion, pago = _serializar_cotizacion_pago(solicitud, db)
+    acciones = _resolver_acciones_disponibles(solicitud, db)
+    cotizaciones_disponibles = _serializar_cotizaciones_disponibles(solicitud, db)
     historial = [
         {
             "estado_anterior": h.estado_anterior,
@@ -654,7 +874,7 @@ def obtener_detalle_solicitud_cliente(db: Session, *, incidente_id: str, current
         "cotizacion_actual": cotizacion,
         "cotizaciones_disponibles": cotizaciones_disponibles,
         "pago_actual": pago,
-        "acciones_disponibles": _resolver_acciones_disponibles(solicitud),
+        "acciones_disponibles": acciones,
     }
 
 
@@ -672,10 +892,18 @@ def cancelar_solicitud_cliente(
         current_user=current_user,
         motivo_cancelacion=motivo_cancelacion,
     )
+    _, pago = _serializar_cotizacion_pago(solicitud, db)
+    estado_key = _estado_key(solicitud.estado)
     return {
         "incidente_id": str(solicitud.id),
         "estado": str(solicitud.estado),
-        "mensaje": "Solicitud cancelada correctamente",
+        "pago_actual": pago,
+        "requiere_pago": estado_key == "cancelado_con_cobro" and pago is not None,
+        "mensaje": (
+            "Solicitud cancelada con cobro por visita. Debes procesar el pago pendiente."
+            if estado_key == "cancelado_con_cobro"
+            else "Solicitud cancelada correctamente"
+        ),
     }
 
 

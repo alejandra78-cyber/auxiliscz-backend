@@ -414,6 +414,44 @@ def _ensure_incremental_schema() -> None:
                 # Compatibilidad con esquemas legacy donde pago_id o solicitud_id quedaron rígidos.
                 conn.execute(text("ALTER TABLE cotizaciones ALTER COLUMN pago_id DROP NOT NULL"))
                 conn.execute(text("ALTER TABLE cotizaciones ALTER COLUMN solicitud_id DROP NOT NULL"))
+                conn.execute(
+                    text(
+                        """
+                        WITH ranked AS (
+                            SELECT
+                                id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY solicitud_id, taller_id
+                                    ORDER BY
+                                        CASE WHEN estado = 'aceptada' THEN 0 ELSE 1 END,
+                                        COALESCE(fecha_respuesta_cliente, actualizado_en, creado_en, fecha_emision) DESC NULLS LAST,
+                                        id DESC
+                                ) AS rn
+                            FROM cotizaciones
+                            WHERE solicitud_id IS NOT NULL
+                              AND taller_id IS NOT NULL
+                              AND estado IN ('pendiente', 'enviada', 'aceptada', 'cotizacion_enviada')
+                        )
+                        UPDATE cotizaciones c
+                        SET estado = 'rechazada',
+                            actualizado_en = COALESCE(c.actualizado_en, NOW())
+                        FROM ranked r
+                        WHERE c.id = r.id
+                          AND r.rn > 1
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS ux_cotizaciones_activas_solicitud_taller
+                        ON cotizaciones(solicitud_id, taller_id)
+                        WHERE solicitud_id IS NOT NULL
+                          AND taller_id IS NOT NULL
+                          AND estado IN ('pendiente', 'enviada', 'aceptada', 'cotizacion_enviada')
+                        """
+                    )
+                )
 
         if "pagos" in tables:
             cols_pago = {c["name"] for c in inspector.get_columns("pagos")}

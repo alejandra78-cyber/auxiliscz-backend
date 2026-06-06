@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -11,14 +11,20 @@ from .schemas import (
     CotizacionOut,
     PagoOut,
     PagoProcesarIn,
+    StripeCheckoutOut,
+    StripePaymentSheetOut,
 )
 from .services import (
+    confirmar_stripe_payment_sheet,
     cotizacion_out,
+    crear_stripe_checkout,
+    crear_stripe_payment_sheet,
     estado_paquete_pagos,
     generar_cotizacion_taller,
     listar_cotizaciones_taller,
     obtener_cotizacion_cliente,
     procesar_pago_cliente,
+    procesar_stripe_webhook,
     responder_cotizacion_cliente,
 )
 
@@ -123,3 +129,37 @@ def procesar_pago_endpoint(
         comprobante_url=payload.comprobante_url,
         referencia=payload.referencia,
     )
+
+
+@router.post("/{pago_id}/stripe-checkout", response_model=StripeCheckoutOut)
+def crear_stripe_checkout_endpoint(
+    pago_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return crear_stripe_checkout(db, pago_id=pago_id, current_user=current_user)
+
+
+@router.post("/{pago_id}/stripe-payment-sheet", response_model=StripePaymentSheetOut)
+def crear_stripe_payment_sheet_endpoint(
+    pago_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return crear_stripe_payment_sheet(db, pago_id=pago_id, current_user=current_user)
+
+
+@router.post("/{pago_id}/stripe-payment-sheet/confirmar", response_model=PagoOut)
+def confirmar_stripe_payment_sheet_endpoint(
+    pago_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return confirmar_stripe_payment_sheet(db, pago_id=pago_id, current_user=current_user)
+
+
+@router.post("/stripe/webhook")
+async def stripe_webhook_endpoint(request: Request, db: Session = Depends(get_db)):
+    raw_body = await request.body()
+    signature = request.headers.get("stripe-signature")
+    return procesar_stripe_webhook(db, raw_body=raw_body, signature=signature)

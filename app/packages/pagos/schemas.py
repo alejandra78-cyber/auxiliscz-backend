@@ -72,3 +72,18 @@ class PagoOut(BaseModel):
     fecha_pago: str | None = None
     fecha_verificacion: str | None = None
     mensaje: str | None = None
+    stripe_checkout_url: str | None = None
+
+
+class StripeCheckoutOut(BaseModel):
+    pago_id: str
+    checkout_url: str
+    stripe_session_id: str | None = None
+
+
+class StripePaymentSheetOut(BaseModel):
+    paymentIntentClientSecret: str
+    customerId: str
+    customerEphemeralKeySecret: str
+    publishableKey: str
+    pago_id: str

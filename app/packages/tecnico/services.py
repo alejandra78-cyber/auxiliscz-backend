@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.time import local_now_naive
 from app.core.tenant import assert_same_tenant, tenant_id_from
 from app.services.notificaciones import enviar_push_db
-from app.models.models import Asignacion, Historial, Notificacion, Solicitud, Tecnico, Ubicacion, Usuario
+from app.models.models import Asignacion, Historial, Notificacion, Solicitud, Tecnico, TrabajoCompletado, Ubicacion, Usuario
+from app.packages.pagos.services import _cotizacion_aceptada_solicitud, crear_o_actualizar_pago_pendiente
 
 ESTADOS_COMPARTIR_UBICACION = {
     "tecnico_asignado",
@@ -19,6 +20,7 @@ ESTADOS_COMPARTIR_UBICACION = {
     "cotizacion_emitida",
     "cotizacion_aceptada",
     "en_proceso",
+    "trabajo_completado",
 }
 
 ACCIONES_ESTADO_TECNICO = {
@@ -302,8 +304,9 @@ def actualizar_estado_desde_tecnico(
     asignacion = (
         db.query(Asignacion)
         .options(
-            joinedload(Asignacion.solicitud).joinedload(Solicitud.cliente),
-            joinedload(Asignacion.solicitud).joinedload(Solicitud.emergencia),
+        joinedload(Asignacion.solicitud).joinedload(Solicitud.cliente),
+        joinedload(Asignacion.solicitud).joinedload(Solicitud.cotizaciones),
+        joinedload(Asignacion.solicitud).joinedload(Solicitud.emergencia),
         )
         .filter(Asignacion.id == asignacion_id)
         .first()
@@ -335,6 +338,17 @@ def actualizar_estado_desde_tecnico(
         tecnico.estado_operativo = "en_proceso"
         tecnico.disponible = False
     if nuevo_estado == "trabajo_completado":
+        cot = _cotizacion_aceptada_solicitud(solicitud, db)
+        if not cot:
+            resumen = ", ".join(
+                f"{str(getattr(c, 'id', ''))}:{getattr(c, 'estado', '')}:{str(getattr(c, 'taller_id', ''))}:{str(getattr(c, 'asignacion_id', ''))}"
+                for c in (solicitud.cotizaciones or [])
+            ) or "sin cotizaciones"
+            raise HTTPException(
+                status_code=400,
+                detail=f"No existe cotización aceptada para habilitar pago. solicitud_id={solicitud.id}. asignacion_id={asignacion.id}. cotizaciones={resumen}",
+            )
+        crear_o_actualizar_pago_pendiente(db, cot=cot, solicitud=solicitud)
         tecnico.estado_operativo = "disponible"
         tecnico.disponible = True
 
@@ -406,4 +420,131 @@ def actualizar_estado_desde_tecnico(
         "latitud_cliente": lat_cli,
         "longitud_cliente": lng_cli,
         "ultima_actualizacion": ahora.isoformat(),
+    }
+
+
+def registrar_trabajo_completado(
+    db: Session,
+    *,
+    current_user: Usuario,
+    asignacion_id: str,
+    descripcion: str,
+    observaciones: str | None,
+    evidencias: list[str],
+) -> dict:
+    if current_user.rol != "tecnico":
+        raise HTTPException(status_code=403, detail="Solo técnico puede registrar trabajo completado")
+
+    tecnico = _obtener_tecnico_de_usuario(db, current_user)
+    asignacion = (
+        db.query(Asignacion)
+        .options(
+            joinedload(Asignacion.solicitud).joinedload(Solicitud.cliente),
+            joinedload(Asignacion.solicitud).joinedload(Solicitud.cotizaciones),
+            joinedload(Asignacion.solicitud).joinedload(Solicitud.emergencia),
+        )
+        .filter(Asignacion.id == asignacion_id)
+        .first()
+    )
+    if not asignacion:
+        raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    assert_same_tenant(asignacion, current_user)
+    if str(asignacion.tecnico_id or "") != str(tecnico.id):
+        raise HTTPException(status_code=403, detail="No autorizado para esta asignación")
+
+    solicitud = asignacion.solicitud
+    if not solicitud:
+        raise HTTPException(status_code=400, detail="La asignación no tiene solicitud")
+    estado_actual = _estado_key(asignacion.estado or solicitud.estado)
+    if estado_actual not in {"tecnico_en_lugar", "en_diagnostico", "en_atencion", "en_proceso"}:
+        raise HTTPException(status_code=400, detail="Solo puedes completar el trabajo después de llegar al lugar")
+    cot = _cotizacion_aceptada_solicitud(solicitud, db)
+    if not cot:
+        resumen = ", ".join(
+            f"{str(getattr(c, 'id', ''))}:{getattr(c, 'estado', '')}:{str(getattr(c, 'taller_id', ''))}"
+            for c in (solicitud.cotizaciones or [])
+        ) or "sin cotizaciones"
+        raise HTTPException(
+            status_code=400,
+            detail=f"No existe cotización aceptada para habilitar pago. solicitud_id={solicitud.id}. cotizaciones={resumen}",
+        )
+
+    ahora = local_now_naive()
+    evidencia_url = ",".join([e.strip() for e in evidencias if e.strip()]) or None
+    trabajo = TrabajoCompletado(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id_from(solicitud, asignacion),
+        solicitud_id=solicitud.id,
+        incidente_id=solicitud.incidente_id,
+        asignacion_id=asignacion.id,
+        taller_id=asignacion.taller_id,
+        tecnico_id=tecnico.id,
+        descripcion=descripcion.strip(),
+        observaciones=(observaciones or "").strip() or None,
+        evidencia_url=evidencia_url,
+        registrado_por_usuario_id=current_user.id,
+        creado_en=ahora,
+    )
+    db.add(trabajo)
+
+    anterior = asignacion.estado or solicitud.estado
+    asignacion.estado = "trabajo_completado"
+    asignacion.fecha_finalizacion = ahora
+    asignacion.observacion_estado = descripcion.strip()
+    solicitud.estado = "trabajo_completado"
+    if solicitud.incidente:
+        solicitud.incidente.estado = "trabajo_completado"
+    if solicitud.emergencia:
+        solicitud.emergencia.estado = "trabajo_completado"
+    tecnico.estado_operativo = "disponible"
+    tecnico.disponible = True
+
+    db.add(
+        Historial(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id_from(solicitud, asignacion),
+            solicitud_id=solicitud.id,
+            incidente_id=solicitud.incidente_id,
+            estado_anterior=anterior,
+            estado_nuevo="trabajo_completado",
+            comentario=f"Trabajo completado por técnico: {descripcion.strip()}",
+        )
+    )
+    pago = crear_o_actualizar_pago_pendiente(db, cot=cot, solicitud=solicitud)
+
+    if solicitud.cliente:
+        db.add(
+            Notificacion(
+                id=uuid.uuid4(),
+                tenant_id=tenant_id_from(solicitud, asignacion),
+                usuario_id=solicitud.cliente.usuario_id,
+                solicitud_id=solicitud.id,
+                incidente_id=solicitud.incidente_id,
+                titulo="Servicio completado",
+                mensaje="El técnico registró el trabajo completado. Ya puedes realizar el pago.",
+                tipo="pago_habilitado",
+                estado="no_leida",
+            )
+        )
+        enviar_push_db(
+            db,
+            usuario_id=solicitud.cliente.usuario_id,
+            payload={
+                "titulo": "Servicio completado",
+                "cuerpo": "El pago ya está habilitado.",
+                "tipo": "pago_habilitado",
+                "solicitud_id": solicitud.id,
+                "incidente_id": solicitud.incidente_id or "",
+            },
+        )
+
+    db.commit()
+    return {
+        "mensaje": "Trabajo completado registrado. Pago habilitado para el cliente.",
+        "estado_servicio": "trabajo_completado",
+        "ultima_actualizacion": ahora.isoformat(),
+        "pago_id": str(pago.id),
+        "monto_total": float(pago.monto),
+        "comision_plataforma": float(pago.comision_plataforma or 0),
+        "monto_taller": float(pago.monto_taller or 0),
     }

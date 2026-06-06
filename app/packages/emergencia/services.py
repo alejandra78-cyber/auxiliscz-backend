@@ -17,6 +17,7 @@ from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
 from app.core.time import local_now_naive
 from app.models.models import Asignacion, OperacionOffline, Solicitud, Usuario, Vehiculo
+from app.packages.pagos.services import _cotizacion_aceptada_solicitud, crear_o_actualizar_pago_pendiente
 
 from .repository import (
     agregar_evidencia_solicitud,
@@ -54,13 +55,19 @@ ESTADOS_CANCELABLES = {
     "en_evaluacion",
     "asignado",
     "aceptada",
+    "taller_confirmado",
+    "confirmada",
+    "cotizacion_aceptada",
     "tecnico_asignado",
     "pendiente_respuesta",
     "pendiente_respuesta_taller",
     "en_camino",
+    "tecnico_en_lugar",
+    "en_diagnostico",
+    "en_atencion",
+    "en_proceso",
 }
 ESTADOS_NO_CANCELABLES = {
-    "en_proceso",
     "atendido",
     "servicio_completado",
     "esperando_pago",
@@ -1170,13 +1177,30 @@ def cancelar_solicitud(
         )
     estado_anterior = solicitud.estado
     motivo = (motivo_cancelacion or "").strip() or "Cancelada por cliente"
+    estados_llegada = {"tecnico_en_lugar", "en_diagnostico", "en_atencion", "en_proceso", "trabajo_completado"}
+    tecnico_llego = estado_actual in estados_llegada or any(
+        _estado_key(a.estado) in estados_llegada for a in (solicitud.asignaciones or [])
+    )
+    cot_aceptada = _cotizacion_aceptada_solicitud(solicitud, db)
+    pago_visita = None
+    estado_cancelacion = "cancelada"
+    if tecnico_llego and cot_aceptada:
+        estado_cancelacion = "cancelado_con_cobro"
+        monto_visita = round(float(cot_aceptada.monto) * 0.30, 2)
+        pago_visita = crear_o_actualizar_pago_pendiente(
+            db,
+            cot=cot_aceptada,
+            solicitud=solicitud,
+            monto_total=monto_visita,
+            tipo="cobro_visita",
+        )
 
     # Cancelar asignaciones activas y liberar técnico si aplica.
     for asig in solicitud.asignaciones:
         estado_asig = _estado_key(asig.estado)
         if estado_asig in {"cancelada", "cancelado", "rechazada", "finalizado", "completado", "completada"}:
             continue
-        asig.estado = "cancelada"
+        asig.estado = estado_cancelacion
         asig.motivo_cancelacion = motivo
         asig.cancelado_en = local_now_naive()
         if asig.tecnico and _estado_key(asig.tecnico.estado_operativo) in {
@@ -1194,16 +1218,24 @@ def cancelar_solicitud(
                 solicitud_id=solicitud.id,
                 incidente_id=solicitud.incidente_id,
                 titulo="Solicitud cancelada por cliente",
-                mensaje=f"La solicitud {solicitud.id} fue cancelada por el cliente.",
-                tipo="cancelacion",
+                mensaje=(
+                    f"La solicitud {solicitud.id} fue cancelada con cobro por visita."
+                    if estado_cancelacion == "cancelado_con_cobro"
+                    else f"La solicitud {solicitud.id} fue cancelada por el cliente."
+                ),
+                tipo="cancelado_con_cobro" if estado_cancelacion == "cancelado_con_cobro" else "cancelacion",
             )
 
     registrar_cambio_estado(
         db,
         solicitud=solicitud,
         estado_anterior=estado_anterior,
-        estado_nuevo="cancelada",
-        comentario=motivo,
+        estado_nuevo=estado_cancelacion,
+        comentario=(
+            f"{motivo}. Se generó cobro por visita de {pago_visita.monto} Bs."
+            if pago_visita
+            else motivo
+        ),
     )
     if solicitud.incidente:
         solicitud.incidente.motivo_cancelacion = motivo
@@ -1214,9 +1246,13 @@ def cancelar_solicitud(
         usuario_id=current_user.id,
         solicitud_id=solicitud.id,
         incidente_id=solicitud.incidente_id,
-        titulo="Solicitud cancelada",
-        mensaje="Tu solicitud fue cancelada correctamente.",
-        tipo="cancelacion",
+        titulo="Solicitud cancelada con cobro" if pago_visita else "Solicitud cancelada",
+        mensaje=(
+            f"Tu solicitud fue cancelada. Debes pagar {pago_visita.monto} Bs por visita técnica."
+            if pago_visita
+            else "Tu solicitud fue cancelada correctamente."
+        ),
+        tipo="cancelado_con_cobro" if pago_visita else "cancelacion",
     )
     db.commit()
     db.refresh(solicitud)

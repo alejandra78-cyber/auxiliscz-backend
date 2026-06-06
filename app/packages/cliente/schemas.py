@@ -83,6 +83,7 @@ class SolicitudAccionesOut(BaseModel):
     puede_ver_cotizacion: bool = False
     puede_responder_cotizacion: bool = False
     puede_pagar: bool = False
+    motivo_pago_no_disponible: str | None = None
     puede_evaluar_servicio: bool = False
 
 
@@ -121,6 +122,8 @@ class HistorialEstadoOut(BaseModel):
 
 class CotizacionActualOut(BaseModel):
     id: str
+    solicitud_id: str | None = None
+    taller_id: str | None = None
     monto: float
     tiempo_estimado: str | None = None
     estado: str
@@ -140,6 +143,8 @@ class PagoActualOut(BaseModel):
     comision_plataforma: float | None = None
     monto_taller: float | None = None
     metodo: str | None = None
+    referencia: str | None = None
+    stripe_checkout_url: str | None = None
     pagado_en: str | None = None
 
 

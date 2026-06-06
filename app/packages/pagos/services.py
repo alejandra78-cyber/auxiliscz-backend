@@ -2,11 +2,15 @@ import uuid
 from datetime import datetime
 import logging
 import os
+import json
+import hmac
+import hashlib
 
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
+import httpx
 
 from app.core.time import local_now_naive
 from app.core.tenant import assert_same_tenant, stamp_tenant, tenant_id_from
@@ -26,6 +30,7 @@ from app.models.models import (
 from .schemas import CotizacionDecisionOut, CotizacionOut, PagosDemoOut
 
 logger = logging.getLogger(__name__)
+COMISION_PLATAFORMA_PORCENTAJE = 0.10
 
 
 def _estado_pago_compatible(db: Session, estado_semantico: str) -> str:
@@ -136,6 +141,38 @@ def _asignacion_de_cotizacion(cot: Cotizacion, solicitud: Solicitud | None = Non
     return _asignacion_de_taller(solicitud, cot.taller_id)
 
 
+def _resolver_asignacion_cotizacion_estricta(
+    db: Session,
+    *,
+    cot: Cotizacion,
+    solicitud: Solicitud,
+) -> Asignacion:
+    if cot.asignacion_id:
+        asig = db.query(Asignacion).filter(Asignacion.id == cot.asignacion_id).first()
+        if not asig:
+            raise HTTPException(status_code=409, detail="La cotización referencia una asignación inexistente")
+        if str(asig.solicitud_id or "") != str(solicitud.id):
+            raise HTTPException(status_code=409, detail="La asignación de la cotización no pertenece a la solicitud")
+        if cot.taller_id and str(asig.taller_id or "") != str(cot.taller_id):
+            raise HTTPException(status_code=409, detail="La asignación de la cotización no coincide con el taller cotizado")
+        return asig
+
+    candidatas = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if str(a.taller_id or "") == str(cot.taller_id or "")
+        and (a.estado or "").lower() not in {"descartada", "rechazada", "cancelada", "cancelado"}
+    ]
+    if not candidatas:
+        raise HTTPException(status_code=409, detail="No existe asignación válida para la cotización aceptada")
+    if len(candidatas) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Existe más de una asignación para el taller cotizado; no se puede elegir automáticamente",
+        )
+    return candidatas[0]
+
+
 def _resolver_taller_usuario(db: Session, current_user: Usuario) -> Taller | None:
     return db.query(Taller).filter(Taller.usuario_id == current_user.id).first()
 
@@ -204,7 +241,230 @@ def _serializar_pago(pago: Pago, *, cotizacion_id: str, mensaje: str | None = No
         "fecha_pago": pago.pagado_en.isoformat() if pago.pagado_en else None,
         "fecha_verificacion": pago.fecha_verificacion.isoformat() if pago.fecha_verificacion else None,
         "mensaje": mensaje,
+        "stripe_checkout_url": pago.comprobante_url if (pago.metodo or "").lower() == "stripe" else None,
     }
+
+
+def _calcular_comision(monto_total: float) -> tuple[float, float]:
+    comision = round(float(monto_total) * COMISION_PLATAFORMA_PORCENTAJE, 2)
+    monto_taller = round(float(monto_total) - comision, 2)
+    return comision, monto_taller
+
+
+def _cotizaciones_solicitud(solicitud: Solicitud, db: Session | None = None) -> list[Cotizacion]:
+    if db is None:
+        return [
+            cot
+            for cot in (solicitud.cotizaciones or [])
+            if str(cot.solicitud_id or "") == str(solicitud.id)
+        ]
+
+    return (
+        db.query(Cotizacion)
+        .filter(Cotizacion.solicitud_id == solicitud.id)
+        .order_by(Cotizacion.creado_en.asc().nullslast(), Cotizacion.fecha_emision.asc().nullslast())
+        .all()
+    )
+
+
+def _cotizacion_aceptada_solicitud(solicitud: Solicitud, db: Session | None = None) -> Cotizacion | None:
+    cotizaciones = _cotizaciones_solicitud(solicitud, db)
+    aceptadas = [c for c in cotizaciones if (c.estado or "").lower() == "aceptada" and str(c.solicitud_id or "") == str(solicitud.id)]
+    if aceptadas:
+        return sorted(
+            aceptadas,
+            key=lambda c: (
+                c.fecha_respuesta_cliente or c.actualizado_en or c.creado_en or c.fecha_emision or datetime.min,
+                str(c.id),
+            ),
+        )[-1]
+
+    if db is None:
+        return None
+
+    estado_solicitud = (solicitud.estado or "").strip().lower()
+    if estado_solicitud not in {
+        "taller_confirmado",
+        "confirmada",
+        "tecnico_asignado",
+        "en_camino",
+        "tecnico_en_lugar",
+        "en_diagnostico",
+        "en_atencion",
+        "en_proceso",
+        "trabajo_completado",
+        "esperando_pago",
+        "cancelado_con_cobro",
+        "finalizado",
+    }:
+        return None
+
+    asig = _asignacion_definitiva(solicitud)
+    if not asig or not asig.taller_id:
+        return None
+
+    candidatas = [
+        c
+        for c in cotizaciones
+        if str(c.solicitud_id or "") == str(solicitud.id)
+        and str(c.taller_id or "") == str(asig.taller_id)
+    ]
+    if not candidatas:
+        filtros = [Cotizacion.asignacion_id == asig.id]
+        if solicitud.incidente_id:
+            filtros.append(
+                (Cotizacion.incidente_id == solicitud.incidente_id)
+                & (Cotizacion.taller_id == asig.taller_id)
+            )
+        candidatas = (
+            db.query(Cotizacion)
+            .filter(or_(*filtros))
+            .order_by(Cotizacion.creado_en.desc().nullslast(), Cotizacion.fecha_emision.desc().nullslast())
+            .all()
+        )
+    if not candidatas:
+        return None
+
+    con_misma_asignacion = [
+        c for c in candidatas if c.asignacion_id and str(c.asignacion_id) == str(asig.id)
+    ]
+    candidata = sorted(
+        con_misma_asignacion or candidatas,
+        key=lambda c: (
+            c.fecha_respuesta_cliente or c.actualizado_en or c.creado_en or c.fecha_emision or datetime.min,
+            str(c.id),
+        ),
+    )[-1]
+
+    ahora = local_now_naive()
+    candidata.estado = "aceptada"
+    candidata.solicitud_id = solicitud.id
+    candidata.incidente_id = candidata.incidente_id or solicitud.incidente_id
+    candidata.asignacion_id = candidata.asignacion_id or asig.id
+    candidata.taller_id = candidata.taller_id or asig.taller_id
+    candidata.cliente_id = candidata.cliente_id or solicitud.cliente_id
+    candidata.fecha_respuesta_cliente = candidata.fecha_respuesta_cliente or ahora
+    candidata.actualizado_en = ahora
+    asig.estado = asig.estado or "confirmada"
+    asig.es_definitiva = True
+    asig.tipo_asignacion = getattr(asig, "tipo_asignacion", None) or "definitiva"
+    asig.fecha_confirmacion = getattr(asig, "fecha_confirmacion", None) or ahora
+    for otra in cotizaciones:
+        if str(otra.id) == str(candidata.id):
+            continue
+        if (otra.estado or "").lower() in {"pendiente", "emitida", "enviada", "cotizacion_enviada", "aceptada"}:
+            otra.estado = "rechazada"
+            otra.actualizado_en = ahora
+    db.flush()
+    return candidata
+
+
+def _asignacion_definitiva(solicitud: Solicitud) -> Asignacion | None:
+    candidatas = [
+        a
+        for a in (solicitud.asignaciones or [])
+        if getattr(a, "es_definitiva", False)
+        or (a.estado or "").lower()
+        in {"confirmada", "tecnico_asignado", "en_camino", "tecnico_en_lugar", "en_diagnostico", "en_proceso", "trabajo_completado", "esperando_pago"}
+        or (a.estado or "").lower() == "cancelado_con_cobro"
+    ]
+    if not candidatas:
+        return None
+    return sorted(candidatas, key=_orden_asignacion)[-1]
+
+
+def _validar_pago_habilitado(solicitud: Solicitud, cot: Cotizacion) -> Asignacion:
+    estado = (solicitud.estado or "").strip().lower()
+    asig = _asignacion_definitiva(solicitud)
+    if (cot.estado or "").strip().lower() != "aceptada":
+        raise HTTPException(status_code=400, detail="La cotización debe estar aceptada")
+    if not asig or not getattr(asig, "es_definitiva", False):
+        raise HTTPException(status_code=400, detail="Debe existir asignación confirmada")
+    if not asig.tecnico_id:
+        raise HTTPException(status_code=400, detail="Debe existir técnico asignado")
+    if estado not in {"trabajo_completado", "esperando_pago", "cancelado_con_cobro", "finalizado"}:
+        raise HTTPException(status_code=400, detail="El pago se habilita cuando el técnico completa el servicio")
+    return asig
+
+
+def crear_o_actualizar_pago_pendiente(
+    db: Session,
+    *,
+    cot: Cotizacion,
+    solicitud: Solicitud,
+    monto_total: float | None = None,
+    tipo: str = "servicio",
+) -> Pago:
+    monto = round(float(monto_total if monto_total is not None else cot.monto), 2)
+    comision, monto_taller = _calcular_comision(monto)
+    pago = cot.pago
+    if not pago:
+        pago = Pago(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id_from(cot, solicitud),
+            monto=monto,
+            estado=_estado_pago_compatible(db, "pendiente_verificacion"),
+            metodo=None,
+            incidente_id=cot.incidente_id,
+            cliente_id=cot.cliente_id,
+            taller_id=cot.taller_id,
+            referencia=f"tipo:{tipo}",
+            comision_plataforma=comision,
+            monto_taller=monto_taller,
+        )
+        db.add(pago)
+        db.flush()
+        cot.pago_id = pago.id
+    else:
+        estado_actual = (pago.estado or "").lower()
+        if estado_actual not in {"pagado", "completado"}:
+            pago.monto = monto
+            pago.estado = _estado_pago_compatible(db, "pendiente_verificacion")
+            pago.incidente_id = cot.incidente_id
+            pago.cliente_id = cot.cliente_id
+            pago.taller_id = cot.taller_id
+            pago.referencia = f"tipo:{tipo}"
+            pago.comision_plataforma = comision
+            pago.monto_taller = monto_taller
+    return pago
+
+
+def _confirmar_pago(
+    db: Session,
+    *,
+    pago: Pago,
+    metodo: str,
+    referencia: str | None = None,
+    verificado_por=None,
+) -> None:
+    pago.metodo = metodo
+    pago.estado = _estado_pago_compatible(db, "pagado")
+    pago.pagado_en = local_now_naive()
+    pago.fecha_verificacion = local_now_naive()
+    pago.verificado_por = verificado_por
+    if referencia:
+        pago.referencia = referencia
+    cot = pago.cotizaciones[0] if pago.cotizaciones else None
+    solicitud = cot.solicitud if cot else None
+    if solicitud:
+        asig = _asignacion_definitiva(solicitud)
+        _agregar_historial(db, solicitud, "pagado", f"Pago confirmado por {metodo}")
+        if asig:
+            asig.estado = "pagado"
+        if (solicitud.estado or "").lower() != "cancelado_con_cobro":
+            _agregar_historial(db, solicitud, "finalizado", "Servicio finalizado por pago confirmado")
+            if asig:
+                asig.estado = "finalizado"
+                asig.fecha_finalizacion = local_now_naive()
+        if cot and cot.taller and cot.taller.usuario_id:
+            _notificar(
+                db,
+                usuario_id=cot.taller.usuario_id,
+                solicitud=solicitud,
+                titulo="Pago confirmado",
+                mensaje="El cliente confirmó el pago del servicio",
+                tipo="pago_confirmado",
+            )
 
 
 def _agregar_historial(db: Session, solicitud: Solicitud, estado_nuevo: str, comentario: str | None) -> None:
@@ -291,7 +551,7 @@ def generar_cotizacion_taller(
         .filter(
             Cotizacion.solicitud_id == solicitud.id,
             Cotizacion.taller_id == mi_taller.id,
-            Cotizacion.estado.in_(["pendiente", "enviada", "aceptada"]),
+            Cotizacion.estado.in_(["pendiente", "enviada", "aceptada", "cotizacion_enviada"]),
         )
         .first()
     )
@@ -462,7 +722,13 @@ def responder_cotizacion_cliente(
     if aceptar and ya_aceptada:
         raise HTTPException(status_code=409, detail="Ya existe una cotización aceptada para esta solicitud")
 
-    asig = _asignacion_de_cotizacion(cot, solicitud)
+    asig = _resolver_asignacion_cotizacion_estricta(db, cot=cot, solicitud=solicitud)
+    if str(cot.solicitud_id or "") != str(solicitud.id):
+        raise HTTPException(status_code=409, detail="La cotización no pertenece a la solicitud esperada")
+    if cot.taller_id and str(cot.taller_id or "") != str(asig.taller_id or ""):
+        raise HTTPException(status_code=409, detail="La cotización no coincide con la asignación seleccionada")
+    if cot.cliente_id and str(cot.cliente_id or "") != str(cli.id):
+        raise HTTPException(status_code=409, detail="La cotización no pertenece al cliente autenticado")
 
     cot.estado = "aceptada" if aceptar else "rechazada"
     cot.observaciones = ((cot.observaciones or "") + ("\n" if cot.observaciones and observaciones else "") + (observaciones or "")).strip() or cot.observaciones
@@ -550,122 +816,341 @@ def procesar_pago_cliente(
     if not cli or str(cot.cliente_id or "") != str(cli.id):
         raise HTTPException(status_code=403, detail="No autorizado para pagar esta cotización")
 
-    if (cot.estado or "").lower() not in {"aceptada", "cotizacion_aceptada"}:
-        raise HTTPException(status_code=400, detail="La cotización debe estar aceptada para procesar pago")
-
     solicitud = db.query(Solicitud).filter(Solicitud.id == cot.solicitud_id).first()
     if not solicitud:
         raise HTTPException(status_code=404, detail="Solicitud asociada no encontrada")
-    asig = _ultimo_asignacion(solicitud)
-    if (solicitud.estado or "").strip().lower() not in {"trabajo_completado", "esperando_pago"}:
-        raise HTTPException(
-            status_code=400,
-            detail="Solo se puede procesar pago cuando el trabajo esté completado",
-        )
+    asig = _validar_pago_habilitado(solicitud, cot)
 
     metodo = (metodo_pago or "").strip().lower()
-    if metodo not in {"qr", "transferencia", "efectivo"}:
-        raise HTTPException(status_code=400, detail="Método de pago no válido")
+    if metodo not in {"efectivo"}:
+        raise HTTPException(status_code=400, detail="Usa efectivo o el endpoint Stripe Checkout para pagar")
 
-    comision = round(float(cot.monto) * 0.10, 2)
-    monto_taller = round(float(cot.monto) - comision, 2)
-    auto_confirmar_simulado = os.getenv("PAGOS_SIMULADOS_AUTO_CONFIRMAR", "true").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "si",
-    }
-    pago_confirmado = metodo == "efectivo" or auto_confirmar_simulado
-    estado_semantico = "pagado" if pago_confirmado else "pendiente_verificacion"
-    estado_pago = _estado_pago_compatible(db, estado_semantico)
-
-    pago = cot.pago
-    if pago:
-        estado_pago_actual = (pago.estado or "").strip().lower()
-        # Idempotencia estricta: si ya está completado/pagado no repetir.
-        if estado_pago_actual in {"completado", "pagado"}:
-            return _serializar_pago(
-                pago,
-                cotizacion_id=str(cot.id),
-                mensaje="El pago ya fue registrado anteriormente",
-            )
-        # Si ya existe pendiente y no se confirmó, evitar duplicados.
-        if estado_pago_actual in {"pendiente", "pendiente_verificacion"} and not pago_confirmado:
-            return _serializar_pago(
-                pago,
-                cotizacion_id=str(cot.id),
-                mensaje="El pago ya fue registrado y está pendiente de verificación",
-            )
-    if not pago:
-        pago = Pago(
-            id=uuid.uuid4(),
-            tenant_id=tenant_id_from(cot, solicitud),
-            monto=float(cot.monto),
-            estado=estado_pago,
-            metodo=metodo,
-            incidente_id=cot.incidente_id,
-            cliente_id=cot.cliente_id,
-            taller_id=cot.taller_id,
-            comprobante_url=(comprobante_url or "").strip() or None,
-            referencia=(referencia or "").strip() or None,
-            comision_plataforma=comision,
-            monto_taller=monto_taller,
-            pagado_en=local_now_naive(),
-            fecha_verificacion=local_now_naive() if pago_confirmado else None,
-            verificado_por=current_user.id if pago_confirmado else None,
-        )
-        db.add(pago)
-        db.flush()
-        cot.pago_id = pago.id
-    else:
-        pago.tenant_id = tenant_id_from(cot, solicitud)
-        pago.metodo = metodo
-        pago.estado = estado_pago
-        pago.incidente_id = cot.incidente_id
-        pago.cliente_id = cot.cliente_id
-        pago.taller_id = cot.taller_id
-        pago.comprobante_url = (comprobante_url or "").strip() or None
-        pago.referencia = (referencia or "").strip() or None
-        pago.comision_plataforma = comision
-        pago.monto_taller = monto_taller
-        pago.pagado_en = local_now_naive()
-        pago.fecha_verificacion = local_now_naive() if pago_confirmado else None
-        pago.verificado_por = current_user.id if pago_confirmado else None
-
-    nuevo_estado = "pagado" if pago_confirmado else "esperando_pago"
-    _agregar_historial(
-        db,
-        solicitud,
-        nuevo_estado,
-        "Pago confirmado" if pago_confirmado else "Pago pendiente de verificación",
+    pago_existente = cot.pago
+    es_cobro_visita = (
+        (solicitud.estado or "").lower() == "cancelado_con_cobro"
+        or "cobro_visita" in ((pago_existente.referencia if pago_existente else "") or "")
     )
-    if asig:
-        asig.estado = nuevo_estado
-    if pago_confirmado:
-        _agregar_historial(
-            db,
-            solicitud,
-            "finalizado",
-            "Servicio finalizado por pago confirmado",
-        )
-        if asig:
-            asig.estado = "finalizado"
-            asig.fecha_finalizacion = local_now_naive()
-
-    if cot.taller and cot.taller.usuario_id:
-        _notificar(
-            db,
-            usuario_id=cot.taller.usuario_id,
-            solicitud=solicitud,
-            titulo="Actualización de pago",
-            mensaje="El cliente registró pago pendiente de verificación" if not pago_confirmado else "Pago confirmado del servicio",
-            tipo="pago_pendiente" if not pago_confirmado else "pago_confirmado",
-        )
+    pago = crear_o_actualizar_pago_pendiente(
+        db,
+        cot=cot,
+        solicitud=solicitud,
+        monto_total=(float(pago_existente.monto) if es_cobro_visita and pago_existente else None),
+        tipo="cobro_visita" if es_cobro_visita else "servicio",
+    )
+    if (pago.estado or "").lower() in {"pagado", "completado"}:
+        return _serializar_pago(pago, cotizacion_id=str(cot.id), mensaje="El pago ya fue registrado")
+    pago.comprobante_url = (comprobante_url or "").strip() or None
+    _confirmar_pago(
+        db,
+        pago=pago,
+        metodo="efectivo",
+        referencia=(referencia or "").strip() or "Pago en efectivo",
+        verificado_por=current_user.id,
+    )
 
     db.commit()
     db.refresh(pago)
     return _serializar_pago(
         pago,
         cotizacion_id=str(cot.id),
-        mensaje="Pago registrado correctamente" if not pago_confirmado else "Pago procesado y servicio finalizado",
+        mensaje="Pago en efectivo registrado y servicio finalizado",
     )
+
+
+def crear_stripe_checkout(db: Session, *, pago_id: str, current_user: Usuario) -> dict:
+    if current_user.rol not in {"cliente", "conductor"}:
+        raise HTTPException(status_code=403, detail="Solo cliente puede iniciar Stripe Checkout")
+    secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not secret:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no está configurado")
+
+    pago = db.query(Pago).filter(Pago.id == pago_id).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    cot = pago.cotizaciones[0] if pago.cotizaciones else None
+    if not cot or not cot.solicitud:
+        raise HTTPException(status_code=400, detail="Pago sin cotización asociada")
+    cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
+    if not cli or str(pago.cliente_id or "") != str(cli.id):
+        raise HTTPException(status_code=403, detail="No autorizado para este pago")
+    _validar_pago_habilitado(cot.solicitud, cot)
+    if (pago.estado or "").lower() in {"pagado", "completado"}:
+        raise HTTPException(status_code=409, detail="Este pago ya fue confirmado")
+
+    base_url = os.getenv("FRONTEND_URL", "http://localhost:4200").rstrip("/")
+    amount_cents = int(round(float(pago.monto) * 100))
+    data = {
+        "mode": "payment",
+        "success_url": f"{base_url}/pagos/gestionar-cotizacion?stripe=success&pago_id={pago.id}",
+        "cancel_url": f"{base_url}/pagos/gestionar-cotizacion?stripe=cancel&pago_id={pago.id}",
+        "line_items[0][price_data][currency]": os.getenv("STRIPE_CURRENCY", "bob").lower(),
+        "line_items[0][price_data][product_data][name]": "Servicio AuxilioSCZ",
+        "line_items[0][price_data][unit_amount]": str(amount_cents),
+        "line_items[0][quantity]": "1",
+        "metadata[pago_id]": str(pago.id),
+        "metadata[cotizacion_id]": str(cot.id),
+    }
+    try:
+        with httpx.Client(timeout=20) as client:
+            res = client.post(
+                "https://api.stripe.com/v1/checkout/sessions",
+                data=data,
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+        if res.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Stripe rechazó la sesión: {res.text}")
+        payload = res.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudo crear Stripe Checkout: {exc}") from exc
+
+    pago.metodo = "stripe"
+    pago.estado = _estado_pago_compatible(db, "pendiente_verificacion")
+    pago.referencia = payload.get("id") or pago.referencia
+    pago.comprobante_url = payload.get("url") or pago.comprobante_url
+    db.commit()
+    return {
+        "pago_id": str(pago.id),
+        "checkout_url": str(payload.get("url") or ""),
+        "stripe_session_id": payload.get("id"),
+    }
+
+
+def _stripe_secret_key() -> str:
+    secret = os.getenv("STRIPE_SECRET_KEY", "").strip()
+    if not secret:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY no está configurado")
+    return secret
+
+
+def _stripe_publishable_key() -> str:
+    publishable = os.getenv("STRIPE_PUBLISHABLE_KEY", "").strip()
+    if not publishable:
+        raise HTTPException(status_code=500, detail="STRIPE_PUBLISHABLE_KEY no está configurado")
+    return publishable
+
+
+def crear_stripe_payment_sheet(db: Session, *, pago_id: str, current_user: Usuario) -> dict:
+    if current_user.rol not in {"cliente", "conductor"}:
+        raise HTTPException(status_code=403, detail="Solo cliente puede iniciar PaymentSheet")
+
+    secret = _stripe_secret_key()
+    publishable = _stripe_publishable_key()
+    pago = db.query(Pago).filter(Pago.id == pago_id).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    cot_inicial = pago.cotizaciones[0] if pago.cotizaciones else None
+    if not cot_inicial or not cot_inicial.solicitud:
+        raise HTTPException(status_code=400, detail="Pago sin cotización asociada")
+
+    solicitud = cot_inicial.solicitud
+    cot = _cotizacion_aceptada_solicitud(solicitud, db) or cot_inicial
+    if (cot.estado or "").strip().lower() != "aceptada":
+        raise HTTPException(status_code=400, detail="No existe cotización aceptada para este pago")
+    if str(cot.solicitud_id or "") != str(solicitud.id):
+        raise HTTPException(status_code=409, detail="La cotización aceptada no pertenece a la solicitud del pago")
+    if cot.pago_id and str(cot.pago_id) != str(pago.id):
+        pago = cot.pago
+        if not pago:
+            raise HTTPException(status_code=409, detail="La cotización aceptada referencia un pago inexistente")
+    elif not cot.pago_id:
+        cot.pago_id = pago.id
+
+    cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
+    if not cli or str(pago.cliente_id or "") != str(cli.id):
+        raise HTTPException(status_code=403, detail="No autorizado para este pago")
+    _validar_pago_habilitado(solicitud, cot)
+    if (pago.estado or "").lower() in {"pagado", "completado"}:
+        raise HTTPException(status_code=409, detail="Este pago ya fue confirmado")
+
+    es_cobro_visita = (
+        (solicitud.estado or "").lower() == "cancelado_con_cobro"
+        or "cobro_visita" in ((pago.referencia or "").lower())
+    )
+    monto_base = round(float(pago.monto if es_cobro_visita else cot.monto or 0), 2)
+    if monto_base <= 0:
+        raise HTTPException(status_code=400, detail="El monto del pago no es válido")
+    comision, monto_taller = _calcular_comision(monto_base)
+    pago.monto = monto_base
+    pago.comision_plataforma = comision
+    pago.monto_taller = monto_taller
+    pago.cliente_id = cot.cliente_id
+    pago.taller_id = cot.taller_id
+    pago.incidente_id = cot.incidente_id
+
+    currency = "bob"
+    amount_cents = int(round(monto_base * 100))
+    if amount_cents <= 0:
+        raise HTTPException(status_code=400, detail="El monto del pago no es válido")
+
+    headers = {"Authorization": f"Bearer {secret}"}
+    try:
+        with httpx.Client(timeout=20) as client:
+            customer_res = client.post(
+                "https://api.stripe.com/v1/customers",
+                data={
+                    "name": getattr(current_user, "nombre", None) or "Cliente AuxilioSCZ",
+                    "email": getattr(current_user, "email", None) or "",
+                    "metadata[usuario_id]": str(current_user.id),
+                    "metadata[pago_id]": str(pago.id),
+                },
+                headers=headers,
+            )
+            if customer_res.status_code >= 400:
+                raise HTTPException(status_code=502, detail=f"Stripe rechazó el cliente: {customer_res.text}")
+            customer = customer_res.json()
+            customer_id = str(customer.get("id") or "")
+            if not customer_id:
+                raise HTTPException(status_code=502, detail="Stripe no devolvió customerId")
+
+            ephemeral_res = client.post(
+                "https://api.stripe.com/v1/ephemeral_keys",
+                data={"customer": customer_id},
+                headers={**headers, "Stripe-Version": os.getenv("STRIPE_API_VERSION", "2024-06-20")},
+            )
+            if ephemeral_res.status_code >= 400:
+                raise HTTPException(status_code=502, detail=f"Stripe rechazó ephemeral key: {ephemeral_res.text}")
+            ephemeral_key = ephemeral_res.json()
+            ephemeral_secret = str(ephemeral_key.get("secret") or "")
+            if not ephemeral_secret:
+                raise HTTPException(status_code=502, detail="Stripe no devolvió customerEphemeralKeySecret")
+
+            intent_res = client.post(
+                "https://api.stripe.com/v1/payment_intents",
+                data={
+                    "amount": str(amount_cents),
+                    "currency": currency,
+                    "customer": customer_id,
+                    "payment_method_types[0]": "card",
+                    "metadata[pago_id]": str(pago.id),
+                    "metadata[cotizacion_id]": str(cot.id),
+                    "metadata[solicitud_id]": str(cot.solicitud_id),
+                    "metadata[monto_bob]": str(monto_base),
+                    "metadata[tipo_pago]": "cobro_visita" if es_cobro_visita else "servicio",
+                },
+                headers=headers,
+            )
+            if intent_res.status_code >= 400:
+                raise HTTPException(status_code=502, detail=f"Stripe rechazó PaymentIntent: {intent_res.text}")
+            intent = intent_res.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudo iniciar PaymentSheet: {exc}") from exc
+
+    client_secret = str(intent.get("client_secret") or "")
+    payment_intent_id = str(intent.get("id") or "")
+    if not client_secret or not payment_intent_id:
+        raise HTTPException(status_code=502, detail="Stripe no devolvió client_secret")
+
+    pago.metodo = "stripe"
+    pago.estado = _estado_pago_compatible(db, "pendiente_verificacion")
+    pago.referencia = payment_intent_id
+    db.commit()
+    return {
+        "paymentIntentClientSecret": client_secret,
+        "customerId": customer_id,
+        "customerEphemeralKeySecret": ephemeral_secret,
+        "publishableKey": publishable,
+        "pago_id": str(pago.id),
+    }
+
+
+def confirmar_stripe_payment_sheet(db: Session, *, pago_id: str, current_user: Usuario) -> dict:
+    if current_user.rol not in {"cliente", "conductor"}:
+        raise HTTPException(status_code=403, detail="Solo cliente puede confirmar PaymentSheet")
+
+    secret = _stripe_secret_key()
+    pago = db.query(Pago).filter(Pago.id == pago_id).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    cot = pago.cotizaciones[0] if pago.cotizaciones else None
+    if not cot:
+        raise HTTPException(status_code=400, detail="Pago sin cotización asociada")
+    cli = db.query(Cliente).filter(Cliente.usuario_id == current_user.id).first()
+    if not cli or str(pago.cliente_id or "") != str(cli.id):
+        raise HTTPException(status_code=403, detail="No autorizado para este pago")
+
+    if (pago.estado or "").lower() in {"pagado", "completado"}:
+        return _serializar_pago(pago, cotizacion_id=str(cot.id), mensaje="El pago ya fue confirmado")
+
+    payment_intent_id = (pago.referencia or "").strip()
+    if not payment_intent_id.startswith("pi_"):
+        raise HTTPException(status_code=400, detail="El pago no tiene PaymentIntent asociado")
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            res = client.get(
+                f"https://api.stripe.com/v1/payment_intents/{payment_intent_id}",
+                headers={"Authorization": f"Bearer {secret}"},
+            )
+        if res.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Stripe no pudo verificar el pago: {res.text}")
+        intent = res.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudo confirmar PaymentSheet: {exc}") from exc
+
+    if (intent.get("status") or "").lower() != "succeeded":
+        raise HTTPException(status_code=409, detail=f"Stripe aún no confirmó el pago: {intent.get('status')}")
+
+    _confirmar_pago(
+        db,
+        pago=pago,
+        metodo="stripe",
+        referencia=payment_intent_id,
+        verificado_por=current_user.id,
+    )
+    db.commit()
+    db.refresh(pago)
+    return _serializar_pago(pago, cotizacion_id=str(cot.id), mensaje="Pago Stripe confirmado")
+
+
+def _verificar_firma_stripe(raw_body: bytes, signature: str | None) -> None:
+    secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(status_code=500, detail="STRIPE_WEBHOOK_SECRET no está configurado")
+    if not signature:
+        raise HTTPException(status_code=400, detail="Falta Stripe-Signature")
+    parts = dict(part.split("=", 1) for part in signature.split(",") if "=" in part)
+    timestamp = parts.get("t")
+    expected = parts.get("v1")
+    if not timestamp or not expected:
+        raise HTTPException(status_code=400, detail="Firma Stripe inválida")
+    signed = f"{timestamp}.{raw_body.decode('utf-8')}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(digest, expected):
+        raise HTTPException(status_code=400, detail="Firma Stripe inválida")
+
+
+def procesar_stripe_webhook(db: Session, *, raw_body: bytes, signature: str | None) -> dict:
+    _verificar_firma_stripe(raw_body, signature)
+    try:
+        event = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Payload Stripe inválido") from exc
+
+    if event.get("type") != "checkout.session.completed":
+        return {"ok": True, "ignored": True}
+
+    session = ((event.get("data") or {}).get("object") or {})
+    metadata = session.get("metadata") or {}
+    pago_id = metadata.get("pago_id")
+    stripe_session_id = session.get("id")
+    if not pago_id and stripe_session_id:
+        pago = db.query(Pago).filter(Pago.referencia == stripe_session_id).first()
+    else:
+        pago = db.query(Pago).filter(Pago.id == pago_id).first()
+    if not pago:
+        raise HTTPException(status_code=404, detail="Pago Stripe no encontrado")
+    if (pago.estado or "").lower() not in {"pagado", "completado"}:
+        _confirmar_pago(
+            db,
+            pago=pago,
+            metodo="stripe",
+            referencia=stripe_session_id or pago.referencia,
+        )
+        db.commit()
+    return {"ok": True, "pago_id": str(pago.id)}

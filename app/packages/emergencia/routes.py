@@ -112,12 +112,29 @@ def consultar_estado_solicitud_endpoint(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
+    from app.packages.cliente.services import (
+        _asignacion_definitiva_cliente,
+        _cotizacion_aceptada_cliente,
+        obtener_detalle_solicitud_cliente,
+    )
+
     solicitud = consultar_estado_solicitud(
         db,
         incidente_id=incidente_id,
         current_user=current_user,
     )
-    ultimo = solicitud.asignaciones[-1] if solicitud.asignaciones else None
+    detalle = None
+    try:
+        detalle = obtener_detalle_solicitud_cliente(
+            db,
+            incidente_id=str(solicitud.id),
+            current_user=current_user,
+        )
+    except Exception:
+        detalle = None
+    ultimo = _asignacion_definitiva_cliente(solicitud, db)
+    cotizacion_aceptada = _cotizacion_aceptada_cliente(solicitud, db)
+    taller_visible = cotizacion_aceptada.taller if cotizacion_aceptada and cotizacion_aceptada.taller else (ultimo.taller if ultimo and ultimo.taller else None)
     resumen_ia = None
     if solicitud.incidente and solicitud.incidente.resumen_ia:
         resumen_ia = solicitud.incidente.resumen_ia
@@ -147,10 +164,14 @@ def consultar_estado_solicitud_endpoint(
         prioridad=prioridad,
         tipo=tipo,
         resumen_ia=resumen_ia,
-        taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
-        taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
+        taller_id=str(taller_visible.id) if taller_visible and getattr(taller_visible, "id", None) else (str(ultimo.taller_id) if ultimo and ultimo.taller_id else None),
+        taller_nombre=taller_visible.nombre if taller_visible and getattr(taller_visible, "nombre", None) else (ultimo.taller.nombre if ultimo and ultimo.taller else None),
         tecnico_id=str(ultimo.tecnico_id) if ultimo and ultimo.tecnico_id else None,
         tecnico_nombre=ultimo.tecnico.nombre if ultimo and ultimo.tecnico else None,
+        cotizacion_actual=(detalle or {}).get("cotizacion_actual"),
+        cotizaciones_disponibles=(detalle or {}).get("cotizaciones_disponibles", []),
+        pago_actual=(detalle or {}).get("pago_actual"),
+        acciones_disponibles=(detalle or {}).get("acciones_disponibles", {}),
     )
 
 

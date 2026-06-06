@@ -6,8 +6,8 @@ from app.core.time import local_now
 from app.core.security import get_current_user
 from app.api.routes.websocket import manager
 
-from .schemas import TecnicoAccionEstadoIn, TecnicoServicioAsignadoOut, TecnicoUbicacionIn, TecnicoUbicacionOut
-from .services import actualizar_estado_desde_tecnico, listar_mis_servicios_asignados, reportar_mi_ubicacion
+from .schemas import TecnicoAccionEstadoIn, TecnicoServicioAsignadoOut, TecnicoUbicacionIn, TecnicoUbicacionOut, TrabajoCompletadoIn
+from .services import actualizar_estado_desde_tecnico, listar_mis_servicios_asignados, registrar_trabajo_completado, reportar_mi_ubicacion
 
 router = APIRouter()
 
@@ -86,6 +86,22 @@ async def accion_seguimiento_endpoint(
             },
         )
     return resultado
+
+
+@router.post("/trabajo-completado")
+def registrar_trabajo_completado_endpoint(
+    payload: TrabajoCompletadoIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return registrar_trabajo_completado(
+        db,
+        current_user=current_user,
+        asignacion_id=payload.asignacion_id,
+        descripcion=payload.descripcion,
+        observaciones=payload.observaciones,
+        evidencias=payload.evidencias,
+    )
 
 
 __all__ = ["router"]

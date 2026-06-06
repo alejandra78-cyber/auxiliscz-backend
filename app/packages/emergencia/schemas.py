@@ -25,6 +25,10 @@ class EstadoSolicitudOut(BaseModel):
     taller_nombre: str | None = None
     tecnico_id: str | None = None
     tecnico_nombre: str | None = None
+    cotizacion_actual: dict[str, Any] | None = None
+    cotizaciones_disponibles: list[dict[str, Any]] = Field(default_factory=list)
+    pago_actual: dict[str, Any] | None = None
+    acciones_disponibles: dict[str, Any] = Field(default_factory=dict)
 
 
 class UbicacionGpsIn(BaseModel):

@@ -19,6 +19,7 @@ from .schemas import (
     VehiculoUpdateIn,
 )
 from .services import (
+    _cotizacion_aceptada_cliente,
     cancelar_solicitud_cliente,
     consultar_estado_solicitud_cliente,
     consultar_estado_ultima_solicitud_cliente,
@@ -35,7 +36,41 @@ from .services import (
 )
 
 
-def _asignacion_confirmada_cliente(solicitud):
+def _asignacion_confirmada_cliente(solicitud, db: Session | None = None):
+    cotizacion_aceptada = _cotizacion_aceptada_cliente(solicitud, db)
+    asig_cotizacion = None
+    if cotizacion_aceptada and getattr(cotizacion_aceptada, "asignacion_id", None):
+        asig_cotizacion = next(
+            (
+                a
+                for a in (solicitud.asignaciones or [])
+                if str(a.id) == str(cotizacion_aceptada.asignacion_id)
+            ),
+            None,
+        )
+    if cotizacion_aceptada and getattr(cotizacion_aceptada, "taller_id", None):
+        asignaciones_taller_cotizado = [
+            a
+            for a in (solicitud.asignaciones or [])
+            if str(a.taller_id or "") == str(cotizacion_aceptada.taller_id)
+            and (
+                getattr(a, "es_definitiva", False)
+                or (getattr(a, "estado", "") or "").lower() not in {"descartada", "rechazada", "cancelada", "cancelado"}
+            )
+        ]
+        if asignaciones_taller_cotizado:
+            return sorted(
+                asignaciones_taller_cotizado,
+                key=lambda a: (
+                    1 if getattr(a, "es_definitiva", False) else 0,
+                    a.fecha_confirmacion.isoformat() if getattr(a, "fecha_confirmacion", None) else "",
+                    a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
+                    a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",
+                ),
+            )[-1]
+    if asig_cotizacion:
+        return asig_cotizacion
+
     estados_confirmados = {
         "confirmada",
         "tecnico_asignado",
@@ -59,6 +94,7 @@ def _asignacion_confirmada_cliente(solicitud):
     return sorted(
         asignaciones,
         key=lambda a: (
+            1 if getattr(a, "es_definitiva", False) else 0,
             a.fecha_confirmacion.isoformat() if getattr(a, "fecha_confirmacion", None) else "",
             a.fecha_asignacion.isoformat() if getattr(a, "fecha_asignacion", None) else "",
             a.asignado_en.isoformat() if getattr(a, "asignado_en", None) else "",
@@ -66,6 +102,14 @@ def _asignacion_confirmada_cliente(solicitud):
     )[-1]
 
 router = APIRouter()
+
+
+def _taller_visible_cliente(solicitud, db: Session | None = None):
+    cotizacion_aceptada = _cotizacion_aceptada_cliente(solicitud, db)
+    if cotizacion_aceptada and getattr(cotizacion_aceptada, "taller", None):
+        return cotizacion_aceptada.taller
+    ultimo = _asignacion_confirmada_cliente(solicitud, db)
+    return ultimo.taller if ultimo and getattr(ultimo, "taller", None) else None
 
 
 def _tipo_prioridad_actual(solicitud):
@@ -142,7 +186,8 @@ def estado_ultima_solicitud_cliente_endpoint(
     current_user=Depends(get_current_user),
 ):
     solicitud = consultar_estado_ultima_solicitud_cliente(db, current_user=current_user)
-    ultimo = _asignacion_confirmada_cliente(solicitud)
+    ultimo = _asignacion_confirmada_cliente(solicitud, db)
+    taller = _taller_visible_cliente(solicitud, db)
     tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
@@ -150,8 +195,8 @@ def estado_ultima_solicitud_cliente_endpoint(
         estado=str(solicitud.estado),
         prioridad=prioridad,
         tipo=tipo,
-        taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
-        taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
+        taller_id=str(taller.id) if taller and getattr(taller, "id", None) else (str(ultimo.taller_id) if ultimo and ultimo.taller_id else None),
+        taller_nombre=taller.nombre if taller and getattr(taller, "nombre", None) else (ultimo.taller.nombre if ultimo and ultimo.taller else None),
     )
 
 
@@ -162,7 +207,8 @@ def estado_solicitud_cliente_endpoint(
     current_user=Depends(get_current_user),
 ):
     solicitud = consultar_estado_solicitud_cliente(db, incidente_id=incidente_id, current_user=current_user)
-    ultimo = _asignacion_confirmada_cliente(solicitud)
+    ultimo = _asignacion_confirmada_cliente(solicitud, db)
+    taller = _taller_visible_cliente(solicitud, db)
     tipo, prioridad = _tipo_prioridad_actual(solicitud)
     return EstadoSolicitudClienteOut(
         incidente_id=str(solicitud.id),
@@ -170,8 +216,8 @@ def estado_solicitud_cliente_endpoint(
         estado=str(solicitud.estado),
         prioridad=prioridad,
         tipo=tipo,
-        taller_id=str(ultimo.taller_id) if ultimo and ultimo.taller_id else None,
-        taller_nombre=ultimo.taller.nombre if ultimo and ultimo.taller else None,
+        taller_id=str(taller.id) if taller and getattr(taller, "id", None) else (str(ultimo.taller_id) if ultimo and ultimo.taller_id else None),
+        taller_nombre=taller.nombre if taller and getattr(taller, "nombre", None) else (ultimo.taller.nombre if ultimo and ultimo.taller else None),
     )
 
 
