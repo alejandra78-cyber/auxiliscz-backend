@@ -1,8 +1,10 @@
 import json
 import os
+import re
 import secrets
 import unicodedata
 import uuid
+from datetime import date, datetime, timedelta
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -26,8 +28,11 @@ from app.models.models import (
     Cotizacion,
     Disponibilidad,
     Emergencia,
+    Evaluacion,
     Historial,
+    Incidente,
     Notificacion,
+    Pago,
     Rol,
     Servicio,
     SolicitudTaller,
@@ -70,6 +75,148 @@ def _frontend_base_url() -> str:
     return base or "http://localhost:4200"
 
 
+MESES_AUDIO = {
+    "enero": 1,
+    "febrero": 2,
+    "marzo": 3,
+    "abril": 4,
+    "mayo": 5,
+    "junio": 6,
+    "julio": 7,
+    "agosto": 8,
+    "septiembre": 9,
+    "setiembre": 9,
+    "octubre": 10,
+    "noviembre": 11,
+    "diciembre": 12,
+}
+
+DIAS_AUDIO = {"primero": 1, "uno": 1}
+
+
+def _normalizar_audio(texto: str) -> str:
+    limpio = unicodedata.normalize("NFD", (texto or "").lower())
+    limpio = limpio.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", limpio).strip()
+
+
+def _parse_fecha_manual(value: str | None, *, fin: bool = False) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.strip())
+    if len(value.strip()) == 10:
+        return datetime.combine(parsed.date(), datetime.max.time() if fin else datetime.min.time())
+    return parsed
+
+
+def _rango_mes(year: int, month: int) -> tuple[datetime, datetime]:
+    inicio = date(year, month, 1)
+    if month == 12:
+        siguiente = date(year + 1, 1, 1)
+    else:
+        siguiente = date(year, month + 1, 1)
+    return datetime.combine(inicio, datetime.min.time()), datetime.combine(siguiente - timedelta(days=1), datetime.max.time())
+
+
+def _dia_audio(raw: str) -> int:
+    return DIAS_AUDIO.get(raw, int(raw) if raw.isdigit() else 1)
+
+
+def _interpretar_fechas_audio(texto: str, fecha_inicio: str | None = None, fecha_fin: str | None = None) -> tuple[datetime | None, datetime | None]:
+    manual_inicio = _parse_fecha_manual(fecha_inicio)
+    manual_fin = _parse_fecha_manual(fecha_fin, fin=True)
+    if manual_inicio or manual_fin:
+        return manual_inicio, manual_fin
+
+    hoy = local_now_naive().date()
+    if "ayer" in texto:
+        dia = hoy - timedelta(days=1)
+        return datetime.combine(dia, datetime.min.time()), datetime.combine(dia, datetime.max.time())
+    if "hoy" in texto:
+        return datetime.combine(hoy, datetime.min.time()), datetime.combine(hoy, datetime.max.time())
+    if "semana pasada" in texto:
+        lunes = hoy - timedelta(days=hoy.weekday() + 7)
+        domingo = lunes + timedelta(days=6)
+        return datetime.combine(lunes, datetime.min.time()), datetime.combine(domingo, datetime.max.time())
+    if "esta semana" in texto:
+        lunes = hoy - timedelta(days=hoy.weekday())
+        return datetime.combine(lunes, datetime.min.time()), datetime.combine(hoy, datetime.max.time())
+    if "mes pasado" in texto:
+        month = 12 if hoy.month == 1 else hoy.month - 1
+        year = hoy.year - 1 if hoy.month == 1 else hoy.year
+        return _rango_mes(year, month)
+    if "este mes" in texto:
+        return datetime.combine(date(hoy.year, hoy.month, 1), datetime.min.time()), datetime.combine(hoy, datetime.max.time())
+    if "ano pasado" in texto:
+        return datetime(hoy.year - 1, 1, 1), datetime(hoy.year - 1, 12, 31, 23, 59, 59)
+    if "este ano" in texto:
+        return datetime(hoy.year, 1, 1), datetime.combine(hoy, datetime.max.time())
+
+    meses = "|".join(MESES_AUDIO)
+    dia_pattern = r"(\d{1,2}|primero|uno)"
+    match = re.search(r"(?:del|desde el)\s+" + dia_pattern + r"(?:\s+de\s+(" + meses + r"))?\s+(?:al|a|hasta el)\s+" + dia_pattern + r"(?:\s+de\s+(" + meses + r"))?", texto)
+    if match:
+        d1 = _dia_audio(match.group(1))
+        m1 = MESES_AUDIO.get(match.group(2) or match.group(4) or "", hoy.month)
+        d2 = _dia_audio(match.group(3))
+        m2 = MESES_AUDIO.get(match.group(4) or match.group(2) or "", hoy.month)
+        return datetime(hoy.year, m1, d1), datetime.combine(date(hoy.year, m2, d2), datetime.max.time())
+
+    match = re.search(r"entre\s+(" + meses + r")\s+y\s+(" + meses + r")", texto)
+    if match:
+        m1 = MESES_AUDIO[match.group(1)]
+        m2 = MESES_AUDIO[match.group(2)]
+        inicio, _ = _rango_mes(hoy.year, m1)
+        _, fin = _rango_mes(hoy.year, m2)
+        return inicio, fin
+
+    return None, None
+
+
+def _detectar_intencion_audio(texto: str) -> str:
+    if any(x in texto for x in ["evaluacion", "evaluaciones", "calificacion", "estrellas"]):
+        return "reputacion"
+    if "cotizacion" in texto or "cotizaciones" in texto:
+        if any(x in texto for x in ["aceptaron", "aceptadas", "aceptada"]):
+            return "cotizaciones_aceptadas"
+        if any(x in texto for x in ["rechazadas", "rechazada", "rechazaron"]):
+            return "cotizaciones_rechazadas"
+        return "cotizaciones_enviadas"
+    if "pago" in texto or "pagos" in texto:
+        if "pendiente" in texto:
+            return "pagos_pendientes"
+        if any(x in texto for x in ["confirmado", "confirmados", "pagado"]):
+            return "pagos_confirmados"
+    if any(x in texto for x in ["gane", "gane", "dinero", "genere", "cobre", "cobré", "neto", "plataforma", "comision"]):
+        if "plataforma" in texto or "comision" in texto:
+            return "comision_plataforma"
+        if "neto" in texto or "taller" in texto:
+            return "monto_neto_taller"
+        if "stripe" in texto or "tarjeta" in texto:
+            return "ingresos_stripe"
+        if "efectivo" in texto:
+            return "ingresos_efectivo"
+        if "cancelad" in texto:
+            return "ingresos_cancelados"
+        return "ingresos"
+    if "solicitud" in texto or "servicio" in texto:
+        if any(x in texto for x in ["acepte", "aceptadas", "acepté"]):
+            return "solicitudes_aceptadas"
+        if "rechaz" in texto:
+            return "solicitudes_rechazadas"
+        if "pendiente" in texto:
+            return "solicitudes_pendientes"
+        if "cancel" in texto:
+            return "solicitudes_canceladas"
+        if any(x in texto for x in ["complete", "completadas", "completé", "completados"]):
+            return "servicios_completados"
+    return "desconocida"
+
+
+def _fmt_bs(value: float) -> str:
+    return f"{round(float(value or 0), 2)} Bs"
+
+
 class TallerCreate(BaseModel):
     usuario_id: str | None = None
     nombre: str = Field(..., min_length=3)
@@ -82,6 +229,23 @@ class TallerCreate(BaseModel):
     responsable_email: EmailStr | None = None
     responsable_telefono: str | None = None
     password_temporal: str | None = Field(default=None, min_length=6, max_length=128)
+
+
+class ReporteAudioIn(BaseModel):
+    consulta: str
+    fecha_inicio: str | None = None
+    fecha_fin: str | None = None
+
+
+class ReporteAudioOut(BaseModel):
+    consulta: str
+    intencion: str
+    fecha_inicio: str | None = None
+    fecha_fin: str | None = None
+    mensaje: str
+    resumen: list[dict] = []
+    tabla: list[dict] = []
+    sugerencias: list[str] = []
 
 
 class TallerOut(BaseModel):
@@ -1234,6 +1398,188 @@ def mi_taller(db: Session = Depends(get_db), current_user=Depends(get_current_us
     if current_user.rol != "taller":
         raise HTTPException(status_code=403, detail="Solo un taller puede consultar esta información")
     return _to_taller_out(_obtener_taller_de_usuario(db, current_user))
+
+
+@router.post("/reportes/audio", response_model=ReporteAudioOut)
+def consultar_reportes_audio_taller(
+    payload: ReporteAudioIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if current_user.rol != "taller":
+        raise HTTPException(status_code=403, detail="Solo el taller puede consultar reportes por audio")
+    taller = _obtener_taller_de_usuario(db, current_user)
+    texto = _normalizar_audio(payload.consulta)
+    intencion = _detectar_intencion_audio(texto)
+    inicio, fin = _interpretar_fechas_audio(texto, payload.fecha_inicio, payload.fecha_fin)
+    sugerencias = [
+        "¿Cuánto gané este mes?",
+        "¿Cuántos servicios completé?",
+        "¿Cuánto cobré con tarjeta entre enero y marzo?",
+        "¿Cuál es mi calificación promedio?",
+    ]
+
+    def en_rango(fecha: datetime | None) -> bool:
+        if fecha is None:
+            return not inicio and not fin
+        if inicio and fecha and fecha < inicio:
+            return False
+        if fin and fecha and fecha > fin:
+            return False
+        return True
+
+    def fecha_solicitud(solicitud: Solicitud | None) -> datetime | None:
+        if not solicitud:
+            return None
+        return solicitud.creado_en or (solicitud.incidente.creado_en if solicitud.incidente else None)
+
+    def fecha_pago(pago: Pago) -> datetime | None:
+        return pago.pagado_en or pago.fecha_verificacion
+
+    asignaciones = db.query(Asignacion).filter(Asignacion.taller_id == taller.id).all()
+    if taller.tenant_id:
+        asignaciones = [a for a in asignaciones if not a.tenant_id or str(a.tenant_id) == str(taller.tenant_id)]
+    solicitudes_taller_all = []
+    solicitudes = []
+    seen_solicitudes = set()
+    for asignacion in asignaciones:
+        solicitud = asignacion.solicitud
+        if not solicitud or str(solicitud.id) in seen_solicitudes:
+            continue
+        solicitudes_taller_all.append(solicitud)
+        if en_rango(fecha_solicitud(solicitud)):
+            solicitudes.append(solicitud)
+            seen_solicitudes.add(str(solicitud.id))
+
+    cotizaciones = db.query(Cotizacion).filter(Cotizacion.taller_id == taller.id).all()
+    cotizaciones = [c for c in cotizaciones if en_rango(c.fecha_emision)]
+    pagos_directos = db.query(Pago).filter(Pago.taller_id == taller.id).all()
+    pagos_por_cotizacion = (
+        db.query(Pago)
+        .join(Cotizacion, Cotizacion.pago_id == Pago.id)
+        .filter(Cotizacion.taller_id == taller.id)
+        .all()
+    )
+    pagos_por_id = {str(p.id): p for p in [*pagos_directos, *pagos_por_cotizacion]}
+    pagos = list(pagos_por_id.values())
+    pagos = [p for p in pagos if en_rango(fecha_pago(p))]
+    evaluaciones_query = (
+        db.query(Evaluacion)
+        .join(Solicitud, Solicitud.id == Evaluacion.solicitud_id)
+        .join(Asignacion, Asignacion.solicitud_id == Solicitud.id)
+        .filter(Asignacion.taller_id == taller.id)
+        .order_by(Evaluacion.creado_en.desc())
+        .all()
+    )
+    evaluaciones = []
+    seen_eval = set()
+    for evaluacion in evaluaciones_query:
+        if str(evaluacion.id) in seen_eval or not en_rango(evaluacion.creado_en):
+            continue
+        seen_eval.add(str(evaluacion.id))
+        evaluaciones.append(evaluacion)
+
+    if intencion == "desconocida":
+        return ReporteAudioOut(
+            consulta=payload.consulta,
+            intencion=intencion,
+            fecha_inicio=inicio.date().isoformat() if inicio else None,
+            fecha_fin=fin.date().isoformat() if fin else None,
+            mensaje="No entendí la consulta. Prueba con ingresos, pagos, cotizaciones, solicitudes o evaluaciones.",
+            sugerencias=sugerencias,
+        )
+
+    resumen: list[dict] = []
+    tabla: list[dict] = []
+    mensaje = "Consulta procesada correctamente."
+
+    if intencion.startswith("ingresos") or intencion in {"comision_plataforma", "monto_neto_taller"}:
+        filtrados = [p for p in pagos if (p.estado or "").lower() in {"pagado", "completado", "confirmado", "verificado"} or p.pagado_en]
+        if intencion == "ingresos_stripe":
+            filtrados = [p for p in filtrados if "stripe" in (p.metodo or "").lower()]
+        if intencion == "ingresos_efectivo":
+            filtrados = [p for p in filtrados if "efectivo" in (p.metodo or "").lower()]
+        if intencion == "ingresos_cancelados":
+            cancelados_ids = {
+                str(s.incidente_id)
+                for s in solicitudes_taller_all
+                if s.incidente_id and "cancel" in (s.estado or "").lower()
+            }
+            canceladas_por_solicitud = {
+                str(s.id)
+                for s in solicitudes_taller_all
+                if "cancel" in (s.estado or "").lower()
+            }
+            filtrados = [
+                p
+                for p in filtrados
+                if str(p.incidente_id) in cancelados_ids
+                or "cobro_visita" in ((p.referencia or "").lower())
+                or any(str(c.solicitud_id) in canceladas_por_solicitud for c in (p.cotizaciones or []))
+            ]
+        total = sum(float(p.monto or 0) for p in filtrados)
+        comision = sum(float(p.comision_plataforma or 0) for p in filtrados)
+        neto = sum(float(p.monto_taller if p.monto_taller is not None else (float(p.monto or 0) - float(p.comision_plataforma or 0))) for p in filtrados)
+        valor = comision if intencion == "comision_plataforma" else neto if intencion == "monto_neto_taller" else total
+        resumen = [
+            {"label": "Monto total", "valor": _fmt_bs(total)},
+            {"label": "Comisión plataforma", "valor": _fmt_bs(comision)},
+            {"label": "Monto neto taller", "valor": _fmt_bs(neto)},
+            {"label": "Pagos considerados", "valor": len(filtrados)},
+        ]
+        mensaje = f"El resultado de tu consulta es {_fmt_bs(valor)}."
+    elif intencion.startswith("pagos"):
+        estado_objetivo = "pendiente" if intencion == "pagos_pendientes" else "pagado"
+        filtrados = [p for p in pagos if (p.estado or "").lower() == estado_objetivo]
+        resumen = [{"label": "Pagos", "valor": len(filtrados)}, {"label": "Monto", "valor": _fmt_bs(sum(float(p.monto or 0) for p in filtrados))}]
+        mensaje = f"Tienes {len(filtrados)} pagos {estado_objetivo}s."
+    elif intencion.startswith("solicitudes") or intencion == "servicios_completados":
+        estados = {
+            "solicitudes_aceptadas": ["aceptada", "taller_confirmado", "cotizacion_aceptada", "tecnico_asignado"],
+            "solicitudes_rechazadas": ["rechazado", "rechazada"],
+            "solicitudes_pendientes": ["pendiente", "pendiente_respuesta", "esperando_respuestas"],
+            "solicitudes_canceladas": ["cancelado", "cancelada", "cancelado_con_cobro"],
+            "servicios_completados": ["trabajo_completado", "finalizado", "pagado", "completado"],
+        }[intencion]
+        filtradas = [s for s in solicitudes if (s.estado or "").lower() in estados]
+        resumen = [{"label": "Solicitudes", "valor": len(filtradas)}]
+        mensaje = f"Encontré {len(filtradas)} solicitudes para esa consulta."
+    elif intencion.startswith("cotizaciones"):
+        estados = {
+            "cotizaciones_enviadas": None,
+            "cotizaciones_aceptadas": ["aceptada"],
+            "cotizaciones_rechazadas": ["rechazada", "rechazado"],
+        }[intencion]
+        filtradas = cotizaciones if estados is None else [c for c in cotizaciones if (c.estado or "").lower() in estados]
+        resumen = [{"label": "Cotizaciones", "valor": len(filtradas)}]
+        mensaje = f"Encontré {len(filtradas)} cotizaciones."
+    elif intencion == "reputacion":
+        estrellas = [int(e.estrellas or 0) for e in evaluaciones if e.estrellas is not None]
+        promedio = round(sum(estrellas) / len(estrellas), 2) if estrellas else None
+        resumen = [
+            {"label": "Calificación promedio", "valor": f"{promedio} / 5" if promedio is not None else "Sin evaluaciones"},
+            {"label": "Evaluaciones recibidas", "valor": len(evaluaciones)},
+        ]
+        tabla = [
+            {
+                "fecha": e.creado_en.isoformat() if e.creado_en else None,
+                "estrellas": int(e.estrellas or 0),
+                "comentario": e.comentario or "Sin comentario",
+            }
+            for e in evaluaciones[:5]
+        ]
+        mensaje = "Estas son tus métricas de reputación."
+
+    return ReporteAudioOut(
+        consulta=payload.consulta,
+        intencion=intencion,
+        fecha_inicio=inicio.date().isoformat() if inicio else None,
+        fecha_fin=fin.date().isoformat() if fin else None,
+        mensaje=mensaje,
+        resumen=resumen,
+        tabla=tabla,
+        sugerencias=sugerencias if not resumen and not tabla else [],
+    )
 
 
 @router.get("/servicios", response_model=list[ServicioOut])
