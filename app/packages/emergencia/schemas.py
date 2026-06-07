@@ -81,6 +81,12 @@ class NotificacionOut(BaseModel):
     creada_en: str | None = None
 
 
+class NotificacionEstadoOut(BaseModel):
+    ok: bool = True
+    actualizadas: int = 0
+    mensaje: str = "Notificaciones actualizadas"
+
+
 class OperacionOfflineIn(BaseModel):
     offline_sync_id: str
     tipo_operacion: str

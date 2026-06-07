@@ -206,3 +206,29 @@ class HistorialServicioItemOut(BaseModel):
     trabajo_realizado: str | None = None
     monto_pagado: float | None = None
     evaluacion: dict | None = None
+
+
+class RecomendacionAudioIn(BaseModel):
+    solicitud_id: str = Field(..., min_length=1)
+    consulta: str = Field(..., min_length=1, max_length=500)
+
+
+class RecomendacionRankingOut(BaseModel):
+    posicion: int
+    cotizacion_id: str
+    taller: str
+    monto: float
+    tiempo_estimado: str | None = None
+    calificacion_promedio: float | None = None
+    servicios_completados: int = 0
+    cancelaciones: int = 0
+    cumplimiento_sla: float = 0
+    puntaje: float = 0
+    motivo: str
+
+
+class RecomendacionAudioOut(BaseModel):
+    criterio: str
+    taller_recomendado: str | None = None
+    motivo: str
+    ranking: list[RecomendacionRankingOut] = Field(default_factory=list)

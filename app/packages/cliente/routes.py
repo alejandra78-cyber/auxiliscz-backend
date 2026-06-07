@@ -10,6 +10,8 @@ from .schemas import (
     EvaluarServicioOut,
     EstadoSolicitudClienteOut,
     HistorialServicioItemOut,
+    RecomendacionAudioIn,
+    RecomendacionAudioOut,
     SolicitudClienteDetalleOut,
     SolicitudClienteListItemOut,
     SolicitudSeguimientoOut,
@@ -31,6 +33,7 @@ from .services import (
     listar_solicitudes_cliente,
     mis_vehiculos,
     obtener_detalle_solicitud_cliente,
+    recomendar_talleres_por_audio,
     registrar_vehiculo,
     ver_ubicacion_tecnico,
 )
@@ -275,6 +278,20 @@ def detalle_solicitud_cliente_endpoint(
         db,
         incidente_id=incidente_id,
         current_user=current_user,
+    )
+
+
+@router.post("/cotizaciones/recomendacion-audio", response_model=RecomendacionAudioOut)
+def recomendacion_cotizaciones_audio_endpoint(
+    payload: RecomendacionAudioIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return recomendar_talleres_por_audio(
+        db,
+        current_user=current_user,
+        solicitud_id=payload.solicitud_id,
+        consulta=payload.consulta,
     )
 
 

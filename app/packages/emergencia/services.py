@@ -16,7 +16,7 @@ from app.ai_modules.clasificador import clasificar_incidente
 from app.ai_modules.resumen import generar_resumen
 from app.ai_modules.vision import analizar_imagen
 from app.core.time import local_now_naive
-from app.models.models import Asignacion, OperacionOffline, Solicitud, Usuario, Vehiculo
+from app.models.models import Asignacion, Notificacion, OperacionOffline, Solicitud, Usuario, Vehiculo
 from app.packages.pagos.services import _cotizacion_aceptada_solicitud, crear_o_actualizar_pago_pendiente
 
 from .repository import (
@@ -1353,3 +1353,33 @@ def listar_notificaciones_solicitud(
         }
         for n in rows
     ]
+
+
+def marcar_notificacion_leida(
+    db: Session,
+    *,
+    current_user: Usuario,
+    notificacion_id: str,
+) -> dict:
+    row = (
+        db.query(Notificacion)
+        .filter(Notificacion.id == notificacion_id, Notificacion.usuario_id == current_user.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Notificación no encontrada")
+    row.estado = "leida"
+    db.commit()
+    return {"ok": True, "actualizadas": 1, "mensaje": "Notificación marcada como leída"}
+
+
+def marcar_todas_notificaciones_leidas(db: Session, *, current_user: Usuario) -> dict:
+    rows = (
+        db.query(Notificacion)
+        .filter(Notificacion.usuario_id == current_user.id, Notificacion.estado == "no_leida")
+        .all()
+    )
+    for row in rows:
+        row.estado = "leida"
+    db.commit()
+    return {"ok": True, "actualizadas": len(rows), "mensaje": "Notificaciones marcadas como leídas"}

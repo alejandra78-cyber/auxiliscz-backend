@@ -6,6 +6,7 @@ from firebase_admin import credentials, initialize_app
 import firebase_admin
 import os
 import json
+import logging
 
 from .api.routes import websocket
 from .packages.admin.routes import router as admin_router
@@ -19,21 +20,43 @@ from .packages.tecnico.routes import router as tecnico_router
 from .packages.tenant.routes import router as tenant_router
 from .core.database import engine, Base
 
+logger = logging.getLogger("auxilioscz.firebase")
+
 
 def init_firebase():
-    firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+    print("INICIANDO FIREBASE")
+    try:
+        firebase_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+        firebase_path = os.getenv(
+            "FIREBASE_CREDENTIALS_PATH",
+            "firebase-credentials.json"
+        )
 
-    if firebase_json:
-        # 🔵 Railway (usa variable)
-        cred_dict = json.loads(firebase_json)
-        cred = credentials.Certificate(cred_dict)
-    else:
-        # 🟢 Local (usa archivo)
-        cred = credentials.Certificate("firebase-credentials.json")
+        print("FIREBASE_CREDENTIALS_JSON existe:", bool(firebase_json))
+        print("Ruta Firebase:", firebase_path)
+        print("Archivo existe:", os.path.exists(firebase_path))
 
-    if not firebase_admin._apps:
-        initialize_app(cred)
+        if firebase_json:
+            cred_dict = json.loads(firebase_json)
+            cred = credentials.Certificate(cred_dict)
+            print("Credenciales cargadas desde FIREBASE_CREDENTIALS_JSON")
 
+        elif os.path.exists(firebase_path):
+            cred = credentials.Certificate(firebase_path)
+            print("Credenciales cargadas desde archivo:", firebase_path)
+
+        else:
+            print("ERROR: No se encontró firebase-credentials.json")
+            return
+
+        if not firebase_admin._apps:
+            initialize_app(cred)
+            print("FIREBASE ADMIN INICIALIZADO CORRECTAMENTE")
+        else:
+            print("Firebase Admin ya estaba inicializado")
+
+    except Exception as exc:
+        print("ERROR AL INICIALIZAR FIREBASE ADMIN:", exc)
 
 init_firebase()
 

@@ -11,6 +11,7 @@ from .schemas import (
     ImagenIncidenteOut,
     MensajeIn,
     MensajeOut,
+    NotificacionEstadoOut,
     NotificacionOut,
     SyncOfflineIn,
     SyncOfflineOut,
@@ -26,6 +27,8 @@ from .services import (
     enviar_ubicacion_gps,
     listar_mensajes_solicitud,
     listar_notificaciones_solicitud,
+    marcar_notificacion_leida,
+    marcar_todas_notificaciones_leidas,
     reportar_emergencia,
     solicitud_es_cancelable,
     sincronizar_operaciones_offline,
@@ -269,6 +272,23 @@ def listar_notificaciones_endpoint(
         current_user=current_user,
         incidente_id=incidente_id,
     )
+
+
+@router.patch("/notificaciones/{notificacion_id}/leida", response_model=NotificacionEstadoOut)
+def marcar_notificacion_leida_endpoint(
+    notificacion_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return marcar_notificacion_leida(db, current_user=current_user, notificacion_id=notificacion_id)
+
+
+@router.patch("/notificaciones/leidas", response_model=NotificacionEstadoOut)
+def marcar_todas_notificaciones_leidas_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return marcar_todas_notificaciones_leidas(db, current_user=current_user)
 
 
 __all__ = ["router"]

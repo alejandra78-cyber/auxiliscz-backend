@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 import uuid
 
 from app.core.tenant import assert_same_tenant, tenant_id_from
-from app.models.models import Asignacion, Cliente, Cotizacion, Evaluacion, Pago, Solicitud, TrabajoCompletado, Ubicacion, Usuario
+from app.models.models import Asignacion, Cliente, Cotizacion, Evaluacion, Pago, Solicitud, Taller, TrabajoCompletado, Ubicacion, Usuario
 from app.packages.emergencia.services import cancelar_solicitud as cancelar_solicitud_emergencia
 
 CANCELABLE_STATES = {
@@ -816,6 +816,213 @@ def _tipo_prioridad_actual(solicitud: Solicitud) -> tuple[str | None, int | None
     if prioridad is None:
         prioridad = int(solicitud.prioridad) if solicitud.prioridad is not None else None
     return tipo, prioridad
+
+
+def _minutos_tiempo_estimado(value: str | None) -> float | None:
+    if not value:
+        return None
+    texto = str(value).lower().replace(",", ".")
+    import re
+
+    numeros = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", texto)]
+    if not numeros:
+        return None
+    base = sum(numeros) / len(numeros) if len(numeros) > 1 and ("-" in texto or " a " in texto) else numeros[0]
+    if "hora" in texto or "hr" in texto or " h" in texto:
+        return base * 60
+    return base
+
+
+def _criterio_recomendacion_audio(consulta: str) -> tuple[str, str]:
+    texto = (consulta or "").lower()
+    if "barat" in texto or "precio" in texto or "econom" in texto:
+        return "precio", "prioriza el menor precio cotizado"
+    if "rapid" in texto or "llega" in texto or "tiempo" in texto:
+        return "tiempo", "prioriza el menor tiempo estimado de llegada o atención"
+    if "calific" in texto or "reputacion" in texto or "reputación" in texto or "estrella" in texto:
+        return "reputacion", "prioriza la mejor calificación promedio del taller"
+    if "calidad" in texto or "relacion" in texto or "relación" in texto or "mejor opcion" in texto or "mejor opción" in texto:
+        return "precio_calidad", "combina precio, tiempo, reputación y cumplimiento"
+    return "general", "combina precio, tiempo, reputación, experiencia, cancelaciones y SLA"
+
+
+def _normalizar_score(value: float, minimum: float, maximum: float, *, invert: bool = False) -> float:
+    if maximum <= minimum:
+        return 1.0
+    score = (value - minimum) / (maximum - minimum)
+    score = 1.0 - score if invert else score
+    return max(0.0, min(1.0, score))
+
+
+def _motivo_comparativo_recomendacion(item: dict, metricas: list[dict], criterio: str, posicion: int) -> str:
+    min_precio = min(m["monto"] for m in metricas)
+    tiempos_validos = [m["tiempo_min"] for m in metricas if m["tiempo_min"] is not None]
+    min_tiempo = min(tiempos_validos) if tiempos_validos else None
+    max_calificacion = max((m["calificacion"] or 0) for m in metricas)
+    max_sla = max(m["sla"] for m in metricas)
+    min_canceladas = min(m["canceladas"] for m in metricas)
+    razones: list[str] = []
+    if item["monto"] == min_precio:
+        razones.append("tiene el menor precio")
+    elif min_precio > 0:
+        razones.append(f"cuesta {round(item['monto'] - min_precio, 2)} Bs más que la opción más barata")
+    if min_tiempo is not None and item["tiempo_min"] is not None:
+        if item["tiempo_min"] == min_tiempo:
+            razones.append("empata o lidera en tiempo estimado")
+        elif criterio in {"tiempo", "general", "precio_calidad"}:
+            razones.append("su tiempo estimado es mayor que el más rápido")
+    if item["calificacion"] is not None:
+        if item["calificacion"] == max_calificacion:
+            razones.append("tiene la mejor calificación disponible")
+        elif criterio in {"reputacion", "general", "precio_calidad"}:
+            razones.append("su calificación es menor que la mejor evaluada")
+    if item["sla"] == max_sla and max_sla > 0:
+        razones.append("presenta el mejor cumplimiento SLA")
+    elif criterio in {"general", "precio_calidad", "tiempo"} and max_sla > 0:
+        razones.append("su SLA queda por debajo de la mejor opción")
+    if item["canceladas"] == min_canceladas and min_canceladas == 0:
+        razones.append("no registra cancelaciones en los datos considerados")
+    if not razones:
+        razones.append("sus datos son muy similares a las demás opciones")
+    prefijo = "Recomendada porque " if posicion == 1 else "Queda en esta posición porque "
+    return prefijo + "; ".join(razones[:3]) + "."
+
+
+def recomendar_talleres_por_audio(db: Session, *, current_user: Usuario, solicitud_id: str, consulta: str) -> dict:
+    _validar_identidad_cliente(current_user)
+    solicitud = consultar_estado_solicitud_cliente(db, incidente_id=solicitud_id, current_user=current_user)
+    criterio, descripcion_criterio = _criterio_recomendacion_audio(consulta)
+    estados_disponibles = {"pendiente", "emitida", "enviada", "cotizacion_enviada", "aceptada"}
+    cotizaciones = [
+        cot
+        for cot in _cotizaciones_solicitud(solicitud, db)
+        if cot.taller_id and _estado_key(cot.estado) in estados_disponibles
+    ]
+    if not cotizaciones:
+        return {
+            "criterio": criterio,
+            "taller_recomendado": None,
+            "motivo": "Todavía no existen cotizaciones disponibles para esta solicitud.",
+            "ranking": [],
+        }
+
+    taller_ids = {cot.taller_id for cot in cotizaciones if cot.taller_id}
+    asignaciones_por_taller = {
+        taller_id: db.query(Asignacion).filter(Asignacion.taller_id == taller_id).all()
+        for taller_id in taller_ids
+    }
+    solicitud_ids_por_taller = {
+        taller_id: {a.solicitud_id for a in asignaciones if a.solicitud_id}
+        for taller_id, asignaciones in asignaciones_por_taller.items()
+    }
+    evaluaciones_por_taller: dict[object, list[Evaluacion]] = {}
+    for taller_id, solicitud_ids in solicitud_ids_por_taller.items():
+        if solicitud_ids:
+            evaluaciones_por_taller[taller_id] = (
+                db.query(Evaluacion).filter(Evaluacion.solicitud_id.in_(solicitud_ids)).all()
+            )
+        else:
+            evaluaciones_por_taller[taller_id] = []
+
+    metricas = []
+    for cot in cotizaciones:
+        taller: Taller | None = cot.taller
+        asignaciones = asignaciones_por_taller.get(cot.taller_id, [])
+        completadas = [
+            a
+            for a in asignaciones
+            if _estado_key(a.estado) in {"finalizado", "pagado", "trabajo_completado", "servicio_completado"}
+            or a.fecha_finalizacion is not None
+        ]
+        canceladas = [
+            a
+            for a in asignaciones
+            if _estado_key(a.estado) in {"cancelado", "cancelada", "rechazado", "rechazada", "descartada", "no_atendido"}
+        ]
+        evaluaciones = evaluaciones_por_taller.get(cot.taller_id, [])
+        promedio_eval = (
+            round(sum(e.estrellas for e in evaluaciones) / len(evaluaciones), 2)
+            if evaluaciones
+            else (round(float(taller.calificacion), 2) if taller and taller.calificacion is not None else None)
+        )
+        sla_total = 0
+        sla_ok = 0
+        for a in completadas:
+            inicio = getattr(a.solicitud, "creado_en", None) if getattr(a, "solicitud", None) else None
+            fin = a.fecha_finalizacion or a.fecha_inicio_servicio
+            if inicio and fin:
+                sla_total += 1
+                if (fin - inicio).total_seconds() / 60 <= 120:
+                    sla_ok += 1
+        cumplimiento_sla = round((sla_ok / sla_total) * 100, 1) if sla_total else 0
+        metricas.append(
+            {
+                "cotizacion": cot,
+                "taller_nombre": taller.nombre if taller else "Taller",
+                "monto": float(cot.monto or 0),
+                "tiempo_min": _minutos_tiempo_estimado(cot.tiempo_estimado),
+                "calificacion": promedio_eval,
+                "completadas": len(completadas),
+                "canceladas": len(canceladas),
+                "sla": cumplimiento_sla,
+            }
+        )
+
+    precios = [m["monto"] for m in metricas]
+    tiempos = [m["tiempo_min"] for m in metricas if m["tiempo_min"] is not None]
+    calificaciones = [m["calificacion"] or 0 for m in metricas]
+    completadas = [m["completadas"] for m in metricas]
+    canceladas = [m["canceladas"] for m in metricas]
+    slas = [m["sla"] for m in metricas]
+
+    for m in metricas:
+        precio_score = _normalizar_score(m["monto"], min(precios), max(precios), invert=True)
+        tiempo_val = m["tiempo_min"] if m["tiempo_min"] is not None else (max(tiempos) if tiempos else 0)
+        tiempo_score = _normalizar_score(tiempo_val, min(tiempos or [0]), max(tiempos or [0]), invert=True)
+        calificacion_score = _normalizar_score(m["calificacion"] or 0, min(calificaciones), max(calificaciones))
+        experiencia_score = _normalizar_score(m["completadas"], min(completadas), max(completadas))
+        cancelacion_score = _normalizar_score(m["canceladas"], min(canceladas), max(canceladas), invert=True)
+        sla_score = _normalizar_score(m["sla"], min(slas), max(slas))
+        if criterio == "precio":
+            puntaje = precio_score * 0.75 + tiempo_score * 0.10 + calificacion_score * 0.15
+        elif criterio == "tiempo":
+            puntaje = tiempo_score * 0.70 + precio_score * 0.15 + sla_score * 0.15
+        elif criterio == "reputacion":
+            puntaje = calificacion_score * 0.65 + sla_score * 0.20 + cancelacion_score * 0.15
+        elif criterio == "precio_calidad":
+            puntaje = precio_score * 0.30 + tiempo_score * 0.20 + calificacion_score * 0.25 + sla_score * 0.15 + cancelacion_score * 0.10
+        else:
+            puntaje = precio_score * 0.25 + tiempo_score * 0.20 + calificacion_score * 0.20 + experiencia_score * 0.15 + cancelacion_score * 0.10 + sla_score * 0.10
+        m["puntaje"] = round(puntaje * 100, 1)
+
+    metricas.sort(key=lambda item: (item["puntaje"], -item["monto"]), reverse=True)
+    ranking = []
+    for index, item in enumerate(metricas, start=1):
+        cot = item["cotizacion"]
+        motivo = _motivo_comparativo_recomendacion(item, metricas, criterio, index)
+        ranking.append(
+            {
+                "posicion": index,
+                "cotizacion_id": str(cot.id),
+                "taller": item["taller_nombre"],
+                "monto": item["monto"],
+                "tiempo_estimado": cot.tiempo_estimado,
+                "calificacion_promedio": item["calificacion"],
+                "servicios_completados": item["completadas"],
+                "cancelaciones": item["canceladas"],
+                "cumplimiento_sla": item["sla"],
+                "puntaje": item["puntaje"],
+                "motivo": motivo,
+            }
+        )
+    top = ranking[0]
+    extra = " Solo hay una cotización disponible; la decisión final sigue siendo tuya." if len(ranking) == 1 else ""
+    return {
+        "criterio": criterio,
+        "taller_recomendado": top["taller"],
+        "motivo": f"Recomendación basada en {descripcion_criterio}: {top['motivo']}{extra}",
+        "ranking": ranking,
+    }
 
 
 def listar_solicitudes_cliente(db: Session, *, current_user: Usuario) -> list[dict]:
