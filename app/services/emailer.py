@@ -58,6 +58,11 @@ def _smtp_config() -> dict[str, str | int | bool]:
 
 def enviar_email(destinatario: str, asunto: str, cuerpo_texto: str) -> bool:
     cfg = _smtp_config()
+
+    print("SMTP_HOST =", cfg["host"])
+    print("SMTP_PORT =", cfg["port"])
+    print("SMTP_USER =", cfg["user"])
+    print("MAIL_FROM =", cfg["from_email"])
     if not cfg["host"] or not cfg["from_email"] or not destinatario or not cfg["user"] or not cfg["password"]:
         logger.error(
             "Email no enviado por configuración SMTP incompleta. host=%s user=%s password=%s from=%s destinatario=%s",
