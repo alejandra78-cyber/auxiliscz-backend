@@ -13,6 +13,7 @@ from .packages.admin.routes import router as admin_router
 from .packages.asignacion.routes import router as asignacion_router
 from .packages.cliente.routes import router as cliente_router
 from .packages.emergencia.routes import router as emergencia_router
+from .packages.emergencia.crash_detection import router as crash_detection_router
 from .packages.auth.routes import router as auth_router
 from .packages.pagos.routes import router as pagos_router
 from .packages.taller.routes import router as taller_router
@@ -1139,6 +1140,7 @@ app.include_router(cliente_router,     prefix="/api/clientes",    tags=["Cliente
 app.include_router(taller_router,      prefix="/api/taller",      tags=["Taller"])
 app.include_router(taller_router,      prefix="/api/talleres",    tags=["Taller (Compat)"])
 app.include_router(emergencia_router,  prefix="/api/emergencia",  tags=["Emergencia"])
+app.include_router(crash_detection_router, prefix="/api/emergencia", tags=["Detección de Accidentes"])
 app.include_router(emergencia_router,  prefix="/api/emergencias", tags=["Emergencia (Compat)"])
 app.include_router(asignacion_router,  prefix="/api/asignacion",  tags=["Asignación"])
 app.include_router(asignacion_router,  prefix="/api/asignaciones", tags=["Asignación (Compat)"])
